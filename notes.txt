@@ -1,0 +1,12 @@
+1. core/config.py        ← settings first, everything imports this
+2. core/database.py      ← async DB engine
+3. core/security.py      ← JWT logic
+4. models/               ← database tables
+5. schemas/              ← request/response shapes
+6. crud/                 ← database queries
+7. core/cleanup.py       ← file deletion scheduler
+8. utils/file_utils.py   ← upload helpers
+9. workers/              ← celery tasks
+10. services/            ← conversion logic
+11. api/routes/          ← HTTP endpoints
+12. main.py              ← wire everything together
