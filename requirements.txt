@@ -1,3 +1,4 @@
+starlette
 pdf2docx
 docx2pdf
 pypdf
@@ -31,3 +32,6 @@ alembic
 sqlalchemy[asyncio]
 asyncpg
 passlib[bcrypt]
+
+
+aiosqlite

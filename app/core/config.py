@@ -1,0 +1,56 @@
+from pydantic_settings import BaseSettings
+from typing import List
+
+
+class Settings(BaseSettings):
+    # App
+    APP_NAME: str = "FileConvert"
+    DEBUG: bool = False
+    SECRET_KEY: str = "change-this-in-production"
+
+    # File handling
+    UPLOAD_DIR: str = "/tmp/fileconvert/uploads"
+    OUTPUT_DIR: str = "/tmp/fileconvert/outputs"
+    MAX_FILE_SIZE_MB: int = 50
+    MAX_FILE_SIZE_MB_PRO: int = 500
+    FILE_TTL_MINUTES: int = 30
+
+    # Rate limiting
+    FREE_CONVERSIONS_PER_DAY: int = 3
+
+    # Redis
+    REDIS_URL: str = "redis://redis:6379/0"
+
+    # Database
+    DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@db:5432/fileconvert"
+
+    # Google OAuth
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_REDIRECT_URI: str = "http://localhost:8000/api/auth/google/callback"
+
+    # Stripe
+    STRIPE_SECRET_KEY: str = ""
+    STRIPE_WEBHOOK_SECRET: str = ""
+    STRIPE_PRO_PRICE_ID: str = ""
+
+    # Storage
+    USE_CLOUD_STORAGE: bool = False
+    R2_ACCOUNT_ID: str = ""
+    R2_ACCESS_KEY_ID: str = ""
+    R2_SECRET_ACCESS_KEY: str = ""
+    R2_BUCKET_NAME: str = "fileconvert-outputs"
+    R2_PUBLIC_URL: str = ""
+
+    # CORS
+    ALLOWED_ORIGINS: List[str] = [
+        "http://localhost:3000",
+        "http://localhost:8000",
+    ]
+
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
+
+
+settings = Settings()
