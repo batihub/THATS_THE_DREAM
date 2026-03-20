@@ -1,14 +1,16 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import SQLModel
+from app.core.config import settings
 
-DATABASE_URL = "sqlite+aiosqlite:///./database.db"
+DATABASE_URL = settings.DATABASE_URL
+_is_sqlite = DATABASE_URL.startswith("sqlite")
 
 engine = create_async_engine(
     DATABASE_URL,
     echo=True,
-    connect_args={"check_same_thread": False} # connect_args={"check_same_thread": False} -> SQLite'ın async çalışması için şart.
-)                                             # change this when migrating to postgres
+    **({"connect_args": {"check_same_thread": False}} if _is_sqlite else {}),
+)
 
 async_session = async_sessionmaker(
     engine,

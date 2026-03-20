@@ -20,6 +20,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p /tmp/fileconvert/uploads /tmp/fileconvert/outputs
-
 EXPOSE 8000

@@ -1,28 +1,31 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
-from app.api.routes import audio, auth, document, image, jobs, payments, pdf, video
+from app.api.routes import audio, auth, document, image, jobs, payments, pdf, video, pages, ai
 from app.core.database import init_database
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_database()
     yield
 
-app = FastAPI(title="FileConvert")
 
-origins = [
-    "*"
-]
+app = FastAPI(title="FileConvert", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins = origins,
-    allow_credentials = True,   #########
-    allow_headers = ["*"],
-    allow_methods = ["*"],
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_headers=["*"],
+    allow_methods=["*"],
 )
 
+# Static files
+app.mount("/static", StaticFiles(directory="frontend/static"), name="static")
+
+# API routes
 app.include_router(pdf.router)
 app.include_router(audio.router)
 app.include_router(auth.router)
@@ -31,3 +34,12 @@ app.include_router(image.router)
 app.include_router(jobs.router)
 app.include_router(payments.router)
 app.include_router(video.router)
+app.include_router(ai.router)
+
+# Page routes (must be last — catches / and tool paths)
+app.include_router(pages.router)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}

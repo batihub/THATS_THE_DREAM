@@ -32,6 +32,8 @@ alembic
 sqlalchemy[asyncio]
 asyncpg
 passlib[bcrypt]
+groq
 
 
 aiosqlite
+jinja2

@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     STRIPE_WEBHOOK_SECRET: str = ""
     STRIPE_PRO_PRICE_ID: str = ""
 
+    # AI
+    GROQ_API_KEY: str = ""
+
     # Storage
     USE_CLOUD_STORAGE: bool = False
     R2_ACCOUNT_ID: str = ""

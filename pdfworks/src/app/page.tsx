@@ -1,0 +1,216 @@
+'use client'
+
+import React, { Fragment } from 'react'
+import Link from 'next/link'
+import dynamic from 'next/dynamic'
+import { motion, useScroll, useTransform } from 'framer-motion'
+import type { LucideIcon } from 'lucide-react'
+import {
+  FileArchive,
+  FilePlus,
+  Scissors,
+  FileOutput,
+  PenLine,
+  ArrowRight,
+  Zap,
+} from 'lucide-react'
+
+// Below-fold sections are code-split into a separate bundle
+const BelowFold = dynamic(() => import('./BelowFold'), {
+  ssr: false,
+  loading: () => <div className="min-h-[200vh]" aria-hidden />,
+})
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const QUICK_TOOLS: { label: string; href: string; Icon: LucideIcon }[] = [
+  { label: 'Compress', href: '/tools/compress-pdf', Icon: FileArchive },
+  { label: 'Merge',    href: '/tools/merge-pdf',    Icon: FilePlus    },
+  { label: 'Convert',  href: '/tools/pdf-converter', Icon: FileOutput  },
+  { label: 'Split',    href: '/tools/split-pdf',    Icon: Scissors    },
+  { label: 'Edit',     href: '/tools/edit-pdf',     Icon: PenLine     },
+]
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HERO
+// ─────────────────────────────────────────────────────────────────────────────
+
+function HeroSection() {
+  const { scrollY } = useScroll()
+  const blob1Y = useTransform(scrollY, [0, 600], [0, -70])
+  const blob2Y = useTransform(scrollY, [0, 600], [0, -45])
+  const blob3Y = useTransform(scrollY, [0, 600], [0, -25])
+
+  return (
+    <section className="relative min-h-[92vh] flex items-center justify-center overflow-hidden bg-gray-50 dark:bg-gray-950 px-4 py-20">
+      {/* Dot grid */}
+      <div
+        className="absolute inset-0 opacity-[0.06] dark:opacity-[0.035]"
+        style={{
+          backgroundImage: 'radial-gradient(circle, var(--dot-color) 1px, transparent 1px)',
+          backgroundSize: '28px 28px',
+        }}
+      />
+
+      {/* Ambient blobs — parallax */}
+      <motion.div
+        animate={{ scale: [1, 1.08, 1], opacity: [0.13, 0.2, 0.13] }}
+        transition={{ duration: 9, repeat: Infinity, ease: 'easeInOut' }}
+        style={{ y: blob1Y, background: 'radial-gradient(circle, rgba(124,58,237,0.6), transparent 70%)' }}
+        className="absolute -top-64 -left-64 w-[640px] h-[640px] rounded-full pointer-events-none"
+      />
+      <motion.div
+        animate={{ scale: [1, 1.12, 1], opacity: [0.08, 0.15, 0.08] }}
+        transition={{ duration: 12, repeat: Infinity, ease: 'easeInOut', delay: 3 }}
+        style={{ y: blob2Y, background: 'radial-gradient(circle, rgba(37,99,235,0.5), transparent 70%)' }}
+        className="absolute -bottom-48 -right-32 w-[560px] h-[560px] rounded-full pointer-events-none"
+      />
+      <motion.div
+        animate={{ scale: [1, 1.2, 1], opacity: [0.04, 0.09, 0.04] }}
+        transition={{ duration: 14, repeat: Infinity, ease: 'easeInOut', delay: 6 }}
+        style={{ y: blob3Y, background: 'radial-gradient(circle, rgba(231,76,60,0.4), transparent 70%)' }}
+        className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[480px] h-[480px] rounded-full pointer-events-none"
+      />
+
+      {/* Content */}
+      <div className="relative z-10 max-w-4xl mx-auto text-center">
+        {/* Badge */}
+        <motion.div
+          initial={{ opacity: 0, scale: 0.9, y: 12 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          transition={{ duration: 0.5, ease: 'easeOut' as const }}
+          className="flex justify-center mb-7"
+        >
+          <span className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full text-xs font-semibold bg-purple-500/10 border border-purple-500/20 text-purple-600 dark:text-purple-300">
+            <Zap className="w-3 h-3" />
+            100% Free · No account required · Files auto-deleted
+          </span>
+        </motion.div>
+
+        {/* Headline */}
+        <h1 className="text-4xl sm:text-5xl lg:text-[4.5rem] font-black tracking-tight leading-[1.07] mb-6">
+          <span className="block">
+            {['Your', 'PDFs.'].map((word, wi) => (
+              <Fragment key={`l1-${wi}`}>
+                <motion.span
+                  initial={{ opacity: 0, y: 28 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.55, delay: 0.12 + wi * 0.11, ease: 'easeOut' as const }}
+                  className="text-gray-900 dark:text-white inline-block"
+                >
+                  {word}
+                </motion.span>
+                {wi < 1 && ' '}
+              </Fragment>
+            ))}
+          </span>
+          <span className="block">
+            {['Your', 'Privacy.'].map((word, wi) => (
+              <Fragment key={`l2-${wi}`}>
+                <motion.span
+                  initial={{ opacity: 0, y: 28 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.55, delay: 0.34 + wi * 0.11, ease: 'easeOut' as const }}
+                  className="text-gray-900 dark:text-white inline-block"
+                >
+                  {word}
+                </motion.span>
+                {wi < 1 && ' '}
+              </Fragment>
+            ))}
+          </span>
+          <motion.span
+            initial={{ opacity: 0, y: 28 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6, delay: 0.58, ease: 'easeOut' as const }}
+            className="block animate-gradient bg-clip-text text-transparent"
+            style={{
+              backgroundImage: 'linear-gradient(90deg, #f87171, #fb923c, #fbbf24, #a78bfa, #f87171)',
+            }}
+          >
+            No Compromises.
+          </motion.span>
+        </h1>
+
+        {/* Subtitle */}
+        <motion.p
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.6, delay: 0.72 }}
+          className="text-gray-600 dark:text-gray-400 text-lg sm:text-xl max-w-2xl mx-auto mb-9 leading-relaxed"
+        >
+          Free, fast PDF tools — no accounts, no tracking, no premium tiers.
+          Just drag, drop, and done.
+        </motion.p>
+
+        {/* CTAs */}
+        <motion.div
+          initial={{ opacity: 0, y: 18 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.55, delay: 0.84 }}
+          className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-14"
+        >
+          <Link
+            href="/tools"
+            className="group inline-flex items-center justify-center gap-2.5 w-full sm:w-auto px-8 py-3.5 rounded-xl font-semibold text-white text-base transition-all duration-200 hover:scale-[1.03] hover:shadow-2xl hover:shadow-red-500/20 active:scale-100"
+            style={{ background: 'linear-gradient(135deg, #e74c3c 0%, #c0392b 100%)' }}
+          >
+            Explore All Tools
+            <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" />
+          </Link>
+          <Link
+            href="/about"
+            className="inline-flex items-center justify-center gap-2 w-full sm:w-auto px-8 py-3.5 rounded-xl font-semibold text-gray-700 dark:text-gray-200 text-base border border-gray-300 dark:border-gray-700 hover:border-gray-400 dark:hover:border-gray-500 hover:bg-gray-100 dark:hover:bg-white/5 hover:scale-[1.02] transition-all duration-200"
+          >
+            Learn About Us
+          </Link>
+        </motion.div>
+
+        {/* Quick-access chips */}
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.4, delay: 0.96 }}
+        >
+          <p className="text-[11px] font-semibold uppercase tracking-[0.15em] text-gray-500 dark:text-gray-600 mb-4">
+            Jump right in
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-2.5">
+            {QUICK_TOOLS.map(({ label, href, Icon }, i) => (
+              <motion.div
+                key={href}
+                initial={{ opacity: 0, scale: 0.82, y: 10 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                transition={{ duration: 0.32, delay: 1.0 + i * 0.08, ease: 'easeOut' as const }}
+              >
+                <Link
+                  href={href}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium bg-gray-100 dark:bg-gray-800/70 border border-gray-300 dark:border-gray-700/60 text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white hover:border-gray-400 dark:hover:border-gray-500 hover:bg-gray-200 dark:hover:bg-gray-700/80 hover:scale-[1.04] transition-all duration-150 backdrop-blur-sm"
+                >
+                  <Icon className="w-3.5 h-3.5" />
+                  {label}
+                </Link>
+              </motion.div>
+            ))}
+          </div>
+        </motion.div>
+      </div>
+
+      {/* Bottom fade */}
+      <div className="absolute bottom-0 inset-x-0 h-36 bg-gradient-to-t from-gray-50 dark:from-gray-950 to-transparent pointer-events-none" />
+    </section>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PAGE
+// ─────────────────────────────────────────────────────────────────────────────
+
+export default function HomePage() {
+  return (
+    <>
+      <HeroSection />
+      <BelowFold />
+    </>
+  )
+}

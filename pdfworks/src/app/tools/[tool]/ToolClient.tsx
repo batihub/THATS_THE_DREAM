@@ -1,0 +1,3035 @@
+'use client'
+
+import React, { useState, useCallback, useEffect, useRef } from 'react'
+import Link from 'next/link'
+import { useDropzone, type Accept } from 'react-dropzone'
+import { motion, AnimatePresence } from 'framer-motion'
+import {
+  Upload, X, CheckCircle, Download, AlertCircle, Clock,
+  ChevronRight, Home, ArrowLeft, Send, Bot, RotateCcw, RotateCw,
+  Loader2, FileText, Zap, Shield, Trash2, Plus, Copy, Eye,
+} from 'lucide-react'
+import type { Tool } from '@/lib/tools-registry'
+import type { ToolCategory } from '@/lib/tool-categories'
+import { ToolIcon } from '@/components/ToolIcon'
+import { submitJob } from '@/lib/api'
+import type { ProgressFn } from '@/lib/api'
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function hexToRgb(hex: string) {
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b = parseInt(hex.slice(5, 7), 16)
+  return `${r}, ${g}, ${b}`
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB']
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`
+}
+
+// ─── Accept types ─────────────────────────────────────────────────────────────
+
+const PDF_ACCEPT: Accept = { 'application/pdf': ['.pdf'] }
+const IMAGE_ACCEPT: Accept = {
+  'image/jpeg': ['.jpg', '.jpeg'],
+  'image/png': ['.png'],
+  'image/webp': ['.webp'],
+  'image/gif': ['.gif'],
+  'image/bmp': ['.bmp'],
+  'image/tiff': ['.tiff', '.tif'],
+}
+
+const VIDEO_ACCEPT: Accept = { 'video/*': ['.mp4', '.mkv', '.mov', '.avi', '.webm'] }
+const AUDIO_ACCEPT: Accept = { 'audio/*': ['.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a'] }
+
+function getAccept(tool: Tool): Accept {
+  const overrides: Record<string, Accept> = {
+    'word-to-pdf': {
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+      'application/msword': ['.doc'],
+    },
+    'ppt-to-pdf': {
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation': ['.pptx'],
+      'application/vnd.ms-powerpoint': ['.ppt'],
+    },
+    'excel-to-pdf': {
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+      'application/vnd.ms-excel': ['.xls'],
+    },
+    'jpg-to-pdf': IMAGE_ACCEPT,
+    'html-to-pdf': { 'text/html': ['.html', '.htm'] },
+    'markdown-to-pdf': { 'text/markdown': ['.md', '.markdown'] },
+    'heic-to-jpg': { 'image/heic': ['.heic'], 'image/heif': ['.heif'] },
+    'png-to-jpg': { 'image/png': ['.png'] },
+    'ocr-image-to-text': {
+      'image/jpeg': ['.jpg', '.jpeg'],
+      'image/png': ['.png'],
+      'image/webp': ['.webp'],
+      'image/tiff': ['.tiff'],
+    },
+    'csv-to-json': { 'text/csv': ['.csv'] },
+    // extract-audio takes VIDEO as input, not audio
+    'extract-audio': VIDEO_ACCEPT,
+  }
+  if (overrides[tool.id]) return overrides[tool.id]
+  if (tool.category === 'image') return IMAGE_ACCEPT
+  if (tool.category === 'audio') return AUDIO_ACCEPT
+  if (tool.category === 'video') return VIDEO_ACCEPT
+  return PDF_ACCEPT
+}
+
+function getAcceptLabel(accept: Accept): string {
+  const exts = Object.values(accept).flat()
+  if (exts.length === 0) return 'file'
+  if (exts.length <= 4) return exts.map((e) => e.toUpperCase().replace('.', '')).join(', ')
+  return exts.slice(0, 3).map((e) => e.toUpperCase().replace('.', '')).join(', ') + ` +${exts.length - 3} more`
+}
+
+function getOutputExtension(tool: Tool): string {
+  if (tool.id.includes('to-word')) return 'docx'
+  if (tool.id.includes('to-ppt')) return 'pptx'
+  if (tool.id.includes('to-excel') || tool.id === 'pdf-to-excel') return 'xlsx'
+  if (tool.id === 'pdf-to-jpg' || tool.id === 'png-to-jpg' || tool.id === 'heic-to-jpg') return 'jpg'
+  if (tool.id === 'csv-to-json') return 'json'
+  if (tool.id === 'ocr-image-to-text' || tool.id === 'pdf-ocr') return 'txt'
+  if (tool.id === 'html-to-pdf' || tool.id === 'markdown-to-pdf') return 'pdf'
+  if (tool.id === 'pdf-to-jpg') return 'zip'
+  if (tool.category === 'audio') return 'mp3'
+  if (tool.category === 'video') return 'mp4'
+  if (tool.category === 'image') return 'jpg'
+  return 'pdf'
+}
+
+// Derive file extension from a Blob's MIME type (used for actual output files)
+function extFromMime(mime: string): string {
+  const map: Record<string, string> = {
+    'application/pdf': 'pdf',
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/bmp': 'bmp',
+    'text/plain': 'txt',
+  }
+  return map[mime] ?? 'bin'
+}
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+type Stage = 'idle' | 'ready' | 'processing' | 'done' | 'error'
+
+interface OptionsState {
+  compressionLevel: string
+  quality: number
+  pageRange: string
+  rotation: number
+  watermarkText: string
+  password: string
+  targetLanguage: string
+  outputFormat: string
+  width: string
+  height: string
+}
+
+// Tools that are fully implemented with real client-side processing (WebAssembly / pdf-lib)
+const REAL_TOOLS = new Set([
+  'compress-pdf', 'merge-pdf', 'split-pdf', 'rotate-pdf',
+  'delete-pages', 'extract-pages', 'number-pages', 'protect-pdf',
+  'watermark-pdf', 'flatten-pdf',
+  'pdf-ocr', 'ocr-image-to-text',
+  'image-compress', 'image-resize', 'image-convert', 'strip-exif',
+])
+
+// Tools that call the FastAPI backend (async job queue)
+const SERVER_TOOLS = new Set([
+  'word-to-pdf', 'ppt-to-pdf', 'excel-to-pdf',
+  'pdf-to-word', 'pdf-to-jpg', 'jpg-to-pdf',
+  'html-to-pdf', 'markdown-to-pdf',
+  'csv-to-json',
+  'strip-metadata',
+  'unlock-pdf',
+  'pdf-to-excel',
+  'heic-to-jpg', 'png-to-jpg',
+  'audio-convert', 'compress-audio', 'extract-audio',
+  'video-convert', 'compress-video',
+])
+
+// Map tool IDs to their backend endpoint and output file extension
+const SERVER_TOOL_ENDPOINTS: Record<string, string> = {
+  'word-to-pdf':      '/api/pdf/word-to-pdf',
+  'ppt-to-pdf':       '/api/pdf/ppt-to-pdf',
+  'excel-to-pdf':     '/api/pdf/excel-to-pdf',
+  'pdf-to-word':      '/api/pdf/to-word',
+  'pdf-to-jpg':       '/api/pdf/to-images',
+  'jpg-to-pdf':       '/api/pdf/from-images',
+  'html-to-pdf':      '/api/document/html-to-pdf',
+  'markdown-to-pdf':  '/api/document/markdown-to-pdf',
+  'csv-to-json':      '/api/document/csv-to-json',
+  'strip-metadata':   '/api/pdf/strip-metadata',
+  'unlock-pdf':       '/api/pdf/unlock',
+  'pdf-to-excel':     '/api/pdf/to-excel',
+  'heic-to-jpg':      '/api/image/convert',
+  'png-to-jpg':       '/api/image/convert',
+  'audio-convert':    '/api/audio/convert',
+  'compress-audio':   '/api/audio/compress',
+  'extract-audio':    '/api/audio/extract-from-video',
+  'video-convert':    '/api/video/convert',
+  'compress-video':   '/api/video/compress',
+}
+
+function getServerOutputExt(toolId: string, outputFormat: string): string {
+  const map: Record<string, string> = {
+    'pdf-to-word':    'docx',
+    'pdf-to-jpg':     'zip',
+    'csv-to-json':    'json',
+    'pdf-to-excel':   'xlsx',
+    'extract-audio':  'mp3',
+    'compress-audio': 'mp3',
+    'compress-video': 'mp4',
+    'png-to-jpg':     'jpg',
+    'heic-to-jpg':    'jpg',
+  }
+  if (toolId === 'audio-convert') return outputFormat || 'mp3'
+  if (toolId === 'video-convert') return outputFormat || 'mp4'
+  return map[toolId] ?? 'pdf'
+}
+
+async function runServerTool(
+  toolId: string,
+  files: File[],
+  options: OptionsState,
+  onProgress: ProgressFn,
+): Promise<Blob> {
+  const endpoint = SERVER_TOOL_ENDPOINTS[toolId]
+  if (!endpoint) throw new Error(`No endpoint configured for tool: ${toolId}`)
+
+  const fd = new FormData()
+
+  switch (toolId) {
+    case 'jpg-to-pdf':
+      for (const f of files) fd.append('files', f)
+      break
+    case 'unlock-pdf':
+      fd.append('file', files[0])
+      fd.append('password', options.password)
+      break
+    case 'heic-to-jpg':
+    case 'png-to-jpg':
+      fd.append('file', files[0])
+      fd.append('target_format', 'jpg')
+      break
+    case 'audio-convert':
+      fd.append('file', files[0])
+      fd.append('target_format', options.outputFormat || 'mp3')
+      break
+    case 'compress-audio': {
+      const bitrateMap: Record<string, string> = { low: '64k', medium: '128k', high: '320k' }
+      fd.append('file', files[0])
+      fd.append('bitrate', bitrateMap[options.compressionLevel] ?? '128k')
+      break
+    }
+    case 'video-convert':
+      fd.append('file', files[0])
+      fd.append('target_format', options.outputFormat || 'mp4')
+      break
+    case 'compress-video':
+      fd.append('file', files[0])
+      fd.append('quality', options.compressionLevel || 'medium')
+      break
+    default:
+      fd.append('file', files[0])
+      break
+  }
+
+  return submitJob(endpoint, fd, onProgress)
+}
+
+const DEFAULT_OPTIONS: OptionsState = {
+  compressionLevel: 'medium',
+  quality: 80,
+  pageRange: '',
+  rotation: 90,
+  watermarkText: 'CONFIDENTIAL',
+  password: '',
+  targetLanguage: 'Spanish',
+  outputFormat: 'jpg',
+  width: '',
+  height: '',
+}
+
+function getDefaultOptions(toolId: string): OptionsState {
+  const defaults = { ...DEFAULT_OPTIONS }
+  if (toolId === 'audio-convert') defaults.outputFormat = 'mp3'
+  if (toolId === 'video-convert') defaults.outputFormat = 'mp4'
+  return defaults
+}
+
+const TOOLS_WITH_OPTIONS = [
+  'compress-pdf', 'image-compress', 'split-pdf', 'extract-pages', 'delete-pages',
+  'rotate-pdf', 'watermark-pdf', 'protect-pdf', 'unlock-pdf', 'translate-pdf',
+  'image-convert', 'png-to-jpg', 'heic-to-jpg', 'image-resize',
+  'compress-audio', 'audio-convert',
+  'compress-video', 'video-convert',
+]
+
+// ─── Tooltip ─────────────────────────────────────────────────────────────────
+
+function Tooltip({ children, label }: { children: React.ReactNode; label: string }) {
+  const [show, setShow] = useState(false)
+  return (
+    <div
+      className="relative"
+      onMouseEnter={() => setShow(true)}
+      onMouseLeave={() => setShow(false)}
+    >
+      {children}
+      <AnimatePresence>
+        {show && (
+          <motion.div
+            initial={{ opacity: 0, y: 6, scale: 0.94 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 6, scale: 0.94 }}
+            transition={{ duration: 0.12 }}
+            className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2.5 px-3 py-1.5 bg-gray-800 text-gray-200 text-xs rounded-lg whitespace-nowrap pointer-events-none border border-gray-700 shadow-xl z-50"
+          >
+            {label}
+            <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-800" />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
+// ─── Breadcrumb ───────────────────────────────────────────────────────────────
+
+function Breadcrumb({ tool, category }: { tool: Tool; category: ToolCategory | undefined }) {
+  return (
+    <div className="border-b border-gray-200 dark:border-gray-800/60 bg-gray-100/50 dark:bg-gray-900/30">
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-3">
+        <nav className="flex items-center gap-1.5 text-xs text-gray-500 overflow-x-auto scrollbar-hide whitespace-nowrap">
+          <Link href="/" className="hover:text-gray-300 transition-colors flex items-center gap-1">
+            <Home className="w-3 h-3" />
+            Home
+          </Link>
+          <ChevronRight className="w-3 h-3 text-gray-700" />
+          <Link href="/tools" className="hover:text-gray-300 transition-colors">
+            All Tools
+          </Link>
+          {category && (
+            <>
+              <ChevronRight className="w-3 h-3 text-gray-700" />
+              <Link href="/tools" className="hover:text-gray-300 transition-colors">
+                {category.name}
+              </Link>
+            </>
+          )}
+          <ChevronRight className="w-3 h-3 text-gray-700" />
+          <span className="text-gray-300">{tool.name}</span>
+        </nav>
+      </div>
+    </div>
+  )
+}
+
+// ─── Quality Buttons (shared across compression tools) ────────────────────────
+
+function QualityButtons({
+  value,
+  onChange,
+}: {
+  value: string
+  onChange: (lvl: string) => void
+}) {
+  const labelCls = 'block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5'
+  return (
+    <div>
+      <label className={labelCls}>Quality</label>
+      <div className="flex gap-2">
+        {(['low', 'medium', 'high'] as const).map((lvl) => (
+          <button
+            key={lvl}
+            type="button"
+            onClick={() => onChange(lvl)}
+            className={`flex-1 py-2.5 rounded-lg text-sm font-semibold border capitalize transition-all ${
+              value === lvl
+                ? 'bg-purple-600 border-purple-500 text-white'
+                : 'bg-gray-100 dark:bg-gray-800 border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:border-gray-400 dark:hover:border-gray-600'
+            }`}
+          >
+            {lvl}
+          </button>
+        ))}
+      </div>
+      <div className="flex justify-between text-xs text-gray-600 mt-1.5">
+        <span>Smallest file</span>
+        <span>Balanced</span>
+        <span>Best quality</span>
+      </div>
+    </div>
+  )
+}
+
+// ─── Tool Options ─────────────────────────────────────────────────────────────
+
+function ToolOptions({
+  toolId,
+  options,
+  onChange,
+}: {
+  toolId: string
+  options: OptionsState
+  onChange: (patch: Partial<OptionsState>) => void
+}) {
+  const inputCls =
+    'w-full bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-purple-500 transition-colors'
+  const labelCls = 'block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1.5'
+
+  if (toolId === 'compress-pdf') {
+    return (
+      <QualityButtons
+        value={options.compressionLevel}
+        onChange={(lvl) => onChange({ compressionLevel: lvl })}
+      />
+    )
+  }
+
+  if (toolId === 'image-compress') {
+    return (
+      <QualityButtons
+        value={options.compressionLevel}
+        onChange={(lvl) => onChange({ compressionLevel: lvl })}
+      />
+    )
+  }
+
+  if (toolId === 'compress-audio') {
+    return (
+      <QualityButtons
+        value={options.compressionLevel}
+        onChange={(lvl) => onChange({ compressionLevel: lvl })}
+      />
+    )
+  }
+
+  if (toolId === 'compress-video') {
+    return (
+      <QualityButtons
+        value={options.compressionLevel}
+        onChange={(lvl) => onChange({ compressionLevel: lvl })}
+      />
+    )
+  }
+
+  if (toolId === 'audio-convert') {
+    const formats = ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac']
+    return (
+      <div>
+        <label className={labelCls}>Output Format</label>
+        <div className="flex gap-2 flex-wrap">
+          {formats.map((f) => (
+            <button
+              key={f}
+              type="button"
+              onClick={() => onChange({ outputFormat: f })}
+              className={`px-4 py-2 rounded-lg text-sm font-semibold border uppercase transition-all ${
+                options.outputFormat === f
+                  ? 'bg-purple-600 border-purple-500 text-white'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+              }`}
+            >
+              {f}
+            </button>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (toolId === 'video-convert') {
+    const formats = ['mp4', 'mkv', 'mov', 'avi', 'webm']
+    return (
+      <div>
+        <label className={labelCls}>Output Format</label>
+        <div className="flex gap-2 flex-wrap">
+          {formats.map((f) => (
+            <button
+              key={f}
+              type="button"
+              onClick={() => onChange({ outputFormat: f })}
+              className={`px-4 py-2 rounded-lg text-sm font-semibold border uppercase transition-all ${
+                options.outputFormat === f
+                  ? 'bg-purple-600 border-purple-500 text-white'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+              }`}
+            >
+              {f}
+            </button>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (toolId === 'split-pdf' || toolId === 'extract-pages' || toolId === 'delete-pages') {
+    return (
+      <div>
+        <label className={labelCls}>Page Range</label>
+        <input
+          type="text"
+          placeholder="e.g. 1-3, 5, 7-9"
+          value={options.pageRange}
+          onChange={(e) => onChange({ pageRange: e.target.value })}
+          className={inputCls}
+        />
+        <p className="text-xs text-gray-600 mt-1.5">
+          Leave empty to {toolId === 'split-pdf' ? 'split every page' : 'select all pages'}
+        </p>
+      </div>
+    )
+  }
+
+  if (toolId === 'rotate-pdf') {
+    return (
+      <div>
+        <label className={labelCls}>Rotation</label>
+        <div className="flex gap-2">
+          {[90, 180, 270].map((deg) => (
+            <button
+              key={deg}
+              onClick={() => onChange({ rotation: deg })}
+              className={`flex-1 py-2 rounded-lg text-sm font-semibold border transition-all ${
+                options.rotation === deg
+                  ? 'bg-purple-600 border-purple-500 text-white'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+              }`}
+            >
+              {deg}°
+            </button>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (toolId === 'watermark-pdf') {
+    return (
+      <div>
+        <label className={labelCls}>Watermark Text</label>
+        <input
+          type="text"
+          placeholder="CONFIDENTIAL"
+          value={options.watermarkText}
+          onChange={(e) => onChange({ watermarkText: e.target.value })}
+          className={inputCls}
+        />
+      </div>
+    )
+  }
+
+  if (toolId === 'protect-pdf' || toolId === 'unlock-pdf') {
+    return (
+      <div>
+        <label className={labelCls}>{toolId === 'protect-pdf' ? 'Set Password' : 'PDF Password (if known)'}</label>
+        <input
+          type="password"
+          placeholder={toolId === 'protect-pdf' ? 'Enter a strong password' : 'Enter PDF password'}
+          value={options.password}
+          onChange={(e) => onChange({ password: e.target.value })}
+          className={inputCls}
+        />
+      </div>
+    )
+  }
+
+  if (toolId === 'translate-pdf') {
+    const LANGUAGES = [
+      'Spanish', 'French', 'German', 'Italian', 'Portuguese',
+      'Chinese', 'Japanese', 'Korean', 'Arabic', 'Russian', 'Dutch', 'Polish',
+    ]
+    return (
+      <div>
+        <label className={labelCls}>Target Language</label>
+        <select
+          className={inputCls}
+          value={options.targetLanguage}
+          onChange={(e) => onChange({ targetLanguage: e.target.value })}
+        >
+          {LANGUAGES.map((l) => (
+            <option key={l}>{l}</option>
+          ))}
+        </select>
+      </div>
+    )
+  }
+
+  if (toolId === 'image-convert' || toolId === 'png-to-jpg' || toolId === 'heic-to-jpg') {
+    const formats =
+      toolId === 'png-to-jpg' || toolId === 'heic-to-jpg'
+        ? [{ value: 'jpg', label: 'JPG' }]
+        : [
+            { value: 'jpg', label: 'JPG' },
+            { value: 'png', label: 'PNG' },
+            { value: 'webp', label: 'WebP' },
+            { value: 'bmp', label: 'BMP' },
+          ]
+    return (
+      <div>
+        <label className={labelCls}>Output Format</label>
+        <div className="flex gap-2 flex-wrap">
+          {formats.map((f) => (
+            <button
+              key={f.value}
+              onClick={() => onChange({ outputFormat: f.value })}
+              className={`px-4 py-2 rounded-lg text-sm font-semibold border transition-all ${
+                options.outputFormat === f.value
+                  ? 'bg-purple-600 border-purple-500 text-white'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-600'
+              }`}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (toolId === 'image-resize') {
+    return (
+      <div className="flex gap-3">
+        <div className="flex-1">
+          <label className={labelCls}>Width (px)</label>
+          <input
+            type="number"
+            placeholder="e.g. 1920"
+            value={options.width}
+            onChange={(e) => onChange({ width: e.target.value })}
+            className={inputCls}
+          />
+        </div>
+        <div className="flex-1">
+          <label className={labelCls}>Height (px)</label>
+          <input
+            type="number"
+            placeholder="e.g. 1080"
+            value={options.height}
+            onChange={(e) => onChange({ height: e.target.value })}
+            className={inputCls}
+          />
+        </div>
+      </div>
+    )
+  }
+
+  return null
+}
+
+// ─── How To section ───────────────────────────────────────────────────────────
+
+const NO_OPTIONS_TOOLS = [
+  'pdf-to-word', 'word-to-pdf', 'pdf-to-ppt', 'ppt-to-pdf', 'pdf-to-excel', 'excel-to-pdf',
+  'pdf-to-jpg', 'jpg-to-pdf', 'html-to-pdf', 'markdown-to-pdf',
+  'heic-to-jpg', 'png-to-jpg', 'strip-exif', 'strip-metadata', 'flatten-pdf',
+  'csv-to-json', 'ocr-image-to-text', 'extract-audio',
+]
+
+function getHowToSteps(tool: Tool): { title: string; description: string }[] {
+  const fileType =
+    tool.category === 'image' ? 'image'
+    : tool.category === 'audio' ? 'audio file'
+    : tool.category === 'video' ? 'video file'
+    : tool.id === 'word-to-pdf' ? 'Word document'
+    : tool.id === 'ppt-to-pdf' ? 'PowerPoint file'
+    : tool.id === 'excel-to-pdf' ? 'Excel spreadsheet'
+    : tool.id === 'csv-to-json' ? 'CSV file'
+    : 'PDF'
+
+  const steps = [
+    {
+      title: `Upload your ${fileType}`,
+      description: `Drag and drop your ${fileType} onto the upload area, or click to browse. Your file is encrypted in transit and never shared.`,
+    },
+    {
+      title: 'Configure options',
+      description: `Adjust any settings for ${tool.name.toLowerCase()}. Defaults are pre-selected for the best result in most cases.`,
+    },
+    {
+      title: 'Download instantly',
+      description: `Click the "${tool.name}" button and your processed file is ready in seconds. Files are deleted from our servers in 30 minutes.`,
+    },
+  ]
+
+  if (NO_OPTIONS_TOOLS.includes(tool.id)) {
+    steps[1] = {
+      title: `Click "${tool.name}"`,
+      description: `Hit the button and let PDFworks handle the conversion — we use optimal defaults automatically, no configuration needed.`,
+    }
+  }
+
+  return steps
+}
+
+function HowToSection({ steps, color }: { steps: { title: string; description: string }[]; color: string }) {
+  const rgb = hexToRgb(color)
+  return (
+    <div className="mb-12">
+      <h2 className="text-xl font-black text-white mb-6">How to use</h2>
+      <div className="grid sm:grid-cols-3 gap-4">
+        {steps.map((step, i) => (
+          <div key={i} className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+            <div
+              className="w-8 h-8 rounded-lg flex items-center justify-center text-sm font-black mb-3"
+              style={{ background: `rgba(${rgb}, 0.12)`, color }}
+            >
+              {i + 1}
+            </div>
+            <h3 className="text-white font-bold text-sm mb-1.5">{step.title}</h3>
+            <p className="text-gray-500 text-xs leading-relaxed">{step.description}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ─── Related Tools ────────────────────────────────────────────────────────────
+
+function RelatedTools({ tools: relTools }: { tools: Tool[] }) {
+  return (
+    <div className="mb-12">
+      <h2 className="text-xl font-black text-white mb-6">Related tools</h2>
+      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        {relTools.map((t) => {
+          const rgb = hexToRgb(t.color)
+          return (
+            <Link key={t.id} href={t.route} className="group block">
+              <div className="bg-gray-900 border border-gray-800 group-hover:border-gray-600 rounded-xl p-4 transition-all duration-200 group-hover:-translate-y-0.5 group-hover:shadow-lg group-hover:shadow-black/30">
+                <div
+                  className="w-9 h-9 rounded-lg flex items-center justify-center mb-3"
+                  style={{ background: `rgba(${rgb}, 0.12)`, color: t.color }}
+                >
+                  <ToolIcon name={t.icon} className="w-4 h-4" />
+                </div>
+                <p className="text-white text-sm font-semibold mb-1">{t.name}</p>
+                <p className="text-gray-500 text-xs leading-relaxed line-clamp-2">{t.description}</p>
+              </div>
+            </Link>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ─── Coming Soon page ─────────────────────────────────────────────────────────
+
+function ComingSoonPage({ tool, category }: { tool: Tool; category: ToolCategory | undefined }) {
+  const [email, setEmail] = useState('')
+  const [submitted, setSubmitted] = useState(false)
+  const rgb = hexToRgb(tool.color)
+
+  return (
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-950 flex flex-col">
+      <Breadcrumb tool={tool} category={category} />
+      <div className="flex-1 flex items-center justify-center px-4 py-20">
+        <div className="text-center max-w-lg">
+          <div
+            className="w-20 h-20 rounded-2xl flex items-center justify-center mx-auto mb-6"
+            style={{ background: `rgba(${rgb}, 0.15)`, color: tool.color }}
+          >
+            <ToolIcon name={tool.icon} className="w-10 h-10" />
+          </div>
+
+          <span
+            className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest px-3 py-1.5 rounded-full mb-5"
+            style={{ background: `rgba(${rgb}, 0.12)`, color: tool.color }}
+          >
+            <Clock className="w-3 h-3" />
+            Coming Soon
+          </span>
+
+          <h1 className="text-3xl sm:text-4xl font-black text-white mb-3 tracking-tight">{tool.name}</h1>
+          <p className="text-gray-400 text-lg mb-8">{tool.description}</p>
+
+          {!submitted ? (
+            <div className="flex flex-col sm:flex-row gap-2 max-w-sm mx-auto">
+              <input
+                type="email"
+                placeholder="your@email.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && email && setSubmitted(true)}
+                className="flex-1 bg-gray-900 border border-gray-700 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-purple-500 transition-colors"
+              />
+              <button
+                onClick={() => email && setSubmitted(true)}
+                className="w-full sm:w-auto px-5 py-3 rounded-xl text-sm font-semibold text-white bg-purple-600 hover:bg-purple-500 transition-colors"
+              >
+                Notify me
+              </button>
+            </div>
+          ) : (
+            <motion.p
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="text-green-400 font-semibold"
+            >
+              You&apos;re on the list.
+            </motion.p>
+          )}
+
+          <p className="text-gray-600 text-sm mt-4">Get an email when {tool.name} launches — no spam, ever.</p>
+
+          <Link
+            href="/tools"
+            className="inline-flex items-center gap-2 mt-10 text-sm text-gray-500 hover:text-gray-300 transition-colors"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            Browse available tools
+          </Link>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── AI Tool Interface ────────────────────────────────────────────────────────
+
+interface Message {
+  id: string
+  role: 'user' | 'ai'
+  content: string
+}
+
+const AI_CANNED: Record<string, string> = {
+  'ai-summarizer':
+    "Here's a structured summary of your document:\n\n**Key Points:**\n• The document presents a comprehensive overview of the subject matter\n• Several supporting arguments and data points are discussed\n• Key conclusions are drawn with actionable recommendations\n\nWould you like me to expand on any particular section?",
+  'translate-pdf':
+    "I've translated your document. The translation preserves the original formatting and structure. Click the download button below to get your translated PDF.",
+  'ai-question-generator':
+    "Here are 5 questions based on your document:\n\n**Q1:** What is the central argument or thesis presented?\n**Q2:** What evidence supports the main claims?\n**Q3:** What are the key recommendations or conclusions?\n**Q4:** How does the document address potential counterarguments?\n**Q5:** What is the significance of the findings described?\n\nWould you like the answer key as well?",
+}
+
+const AI_DEFAULT = [
+  "I've analyzed your document. What would you like to know?",
+  "Based on the content, I can identify several key themes. What specific aspect are you most interested in?",
+  "Great question. Based on the document, the answer relates to the context discussed in the main sections. Would you like me to elaborate?",
+  "I found relevant passages in your document. Here's what the text says about that topic — let me know if you'd like a deeper analysis.",
+]
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function getAIResponse(toolId: string, _msg: string): string {
+  if (AI_CANNED[toolId]) return AI_CANNED[toolId]
+  return AI_DEFAULT[Math.floor(Math.random() * AI_DEFAULT.length)]
+}
+
+function AIToolInterface({
+  tool,
+  category,
+  relatedTools,
+}: {
+  tool: Tool
+  category: ToolCategory | undefined
+  relatedTools: Tool[]
+}) {
+  const rgb = hexToRgb(tool.color)
+  const [pdfFile, setPdfFile] = useState<File | null>(null)
+  const [messages, setMessages] = useState<Message[]>([])
+  const [input, setInput] = useState('')
+  const [isTyping, setIsTyping] = useState(false)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const chatScrollRef  = useRef<HTMLDivElement>(null)
+
+  const onDrop = useCallback(
+    async (files: File[]) => {
+      if (!files[0]) return
+      setPdfFile(files[0])
+
+      if (tool.id === 'ai-summarizer') {
+        setIsTyping(true)
+        try {
+          const formData = new FormData()
+          formData.append('file', files[0])
+          const base = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
+          const res = await fetch(`${base}/api/ai/summarize`, {
+            method: 'POST',
+            body: formData,
+          })
+          const json = await res.json().catch(() => ({}))
+          if (!res.ok) throw new Error((json as { detail?: string }).detail ?? 'Summarization failed')
+          setMessages([
+            {
+              id: Date.now().toString(),
+              role: 'ai',
+              content: `Here's a summary of **${files[0].name}**:\n\n${(json as { summary: string }).summary}`,
+            },
+          ])
+        } catch (err) {
+          setMessages([
+            {
+              id: Date.now().toString(),
+              role: 'ai',
+              content: `Sorry, I couldn't summarize that file. ${err instanceof Error ? err.message : 'Please try again.'}`,
+            },
+          ])
+        } finally {
+          setIsTyping(false)
+        }
+      } else {
+        setTimeout(() => {
+          setMessages([
+            {
+              id: Date.now().toString(),
+              role: 'ai',
+              content: `I've loaded **${files[0].name}**. ${getAIResponse(tool.id, '')}`,
+            },
+          ])
+        }, 700)
+      }
+    },
+    [tool.id],
+  )
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: PDF_ACCEPT,
+    maxFiles: 1,
+    disabled: !!pdfFile,
+  })
+
+  const sendMessage = useCallback(() => {
+    if (!input.trim() || isTyping) return
+    const userMsg: Message = { id: Date.now().toString(), role: 'user', content: input }
+    setMessages((prev) => [...prev, userMsg])
+    setInput('')
+    setIsTyping(true)
+    setTimeout(
+      () => {
+        const aiMsg: Message = {
+          id: (Date.now() + 1).toString(),
+          role: 'ai',
+          content: getAIResponse(tool.id, input),
+        }
+        setMessages((prev) => [...prev, aiMsg])
+        setIsTyping(false)
+      },
+      1000 + Math.random() * 800,
+    )
+  }, [input, isTyping, tool.id])
+
+  useEffect(() => {
+    if (chatScrollRef.current) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight
+    }
+  }, [messages, isTyping])
+
+  const howSteps = [
+    { title: 'Upload your PDF', description: 'Drag and drop or click to select your PDF document.' },
+    {
+      title:
+        tool.id === 'chat-with-pdf' || tool.id === 'ai-pdf-assistant'
+          ? 'Ask a question'
+          : tool.id === 'ai-summarizer'
+            ? 'AI generates a summary'
+            : tool.id === 'translate-pdf'
+              ? 'Choose target language'
+              : 'AI processes the document',
+      description:
+        tool.id === 'chat-with-pdf' || tool.id === 'ai-pdf-assistant'
+          ? 'Type any question about your PDF in plain English.'
+          : 'The AI reads and understands your document automatically.',
+    },
+    {
+      title:
+        tool.id === 'translate-pdf' ? 'Download translated PDF' : 'Review the output',
+      description:
+        tool.id === 'translate-pdf'
+          ? 'Your fully translated PDF is ready to download.'
+          : 'Get instant answers, summaries, or generated questions.',
+    },
+  ]
+
+  return (
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
+      <Breadcrumb tool={tool} category={category} />
+
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Header */}
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4 }}
+          className="flex items-center gap-4 mb-8"
+        >
+          <div
+            className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0"
+            style={{ background: `rgba(${rgb}, 0.15)`, color: tool.color }}
+          >
+            <ToolIcon name={tool.icon} className="w-6 h-6" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-black text-gray-900 dark:text-white tracking-tight">{tool.name}</h1>
+            <p className="text-gray-500 dark:text-gray-400 text-sm">{tool.description}</p>
+          </div>
+          {category && (
+            <span
+              className="hidden sm:inline-flex ml-auto text-xs font-bold uppercase tracking-wider px-3 py-1.5 rounded-full"
+              style={{ background: `rgba(${rgb}, 0.1)`, color: tool.color }}
+            >
+              {category.name}
+            </span>
+          )}
+        </motion.div>
+
+        <div className="grid lg:grid-cols-[1fr_300px] gap-6 mb-12">
+          {/* Chat panel */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, delay: 0.08 }}
+            className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl overflow-hidden flex flex-col min-h-[360px] sm:min-h-[480px] lg:min-h-[520px]"
+          >
+            {!pdfFile ? (
+              <div
+                {...getRootProps()}
+                className={`flex-1 flex flex-col items-center justify-center p-10 cursor-pointer transition-colors ${
+                  isDragActive ? 'bg-gray-800/50' : 'hover:bg-gray-800/20'
+                }`}
+              >
+                <input {...getInputProps()} />
+                <div className="w-16 h-16 rounded-2xl bg-gray-800 border border-gray-700 flex items-center justify-center mb-4">
+                  <Upload className={`w-7 h-7 transition-colors ${isDragActive ? 'text-purple-400' : 'text-gray-500'}`} />
+                </div>
+                <p className="text-gray-300 font-semibold mb-1">Upload your PDF to get started</p>
+                <p className="text-gray-600 text-sm">Drag & drop or click to select</p>
+              </div>
+            ) : (
+              <>
+                {/* File bar */}
+                <div className="px-4 py-3 border-b border-gray-800 flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-red-500/10 flex items-center justify-center flex-shrink-0">
+                    <FileText className="w-4 h-4 text-red-400" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-white font-medium truncate">{pdfFile.name}</p>
+                    <p className="text-xs text-gray-500">{formatBytes(pdfFile.size)}</p>
+                  </div>
+                  <button
+                    onClick={() => { setPdfFile(null); setMessages([]) }}
+                    className="p-1.5 rounded text-gray-600 hover:text-gray-300 transition-colors"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {/* Messages */}
+                <div ref={chatScrollRef} className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+                  {messages.map((msg) => (
+                    <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      {msg.role === 'ai' && (
+                        <div
+                          className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 mr-2 mt-0.5"
+                          style={{ background: `rgba(${rgb}, 0.15)`, color: tool.color }}
+                        >
+                          <Bot className="w-3.5 h-3.5" />
+                        </div>
+                      )}
+                      <div
+                        className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+                          msg.role === 'user'
+                            ? 'bg-purple-600 text-white rounded-br-sm'
+                            : 'bg-gray-800 text-gray-200 rounded-bl-sm'
+                        }`}
+                        style={{ whiteSpace: 'pre-wrap' }}
+                      >
+                        {msg.content}
+                      </div>
+                    </div>
+                  ))}
+
+                  {isTyping && (
+                    <div className="flex justify-start">
+                      <div
+                        className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 mr-2 mt-0.5"
+                        style={{ background: `rgba(${rgb}, 0.15)`, color: tool.color }}
+                      >
+                        <Bot className="w-3.5 h-3.5" />
+                      </div>
+                      <div className="bg-gray-800 rounded-2xl rounded-bl-sm px-4 py-3.5">
+                        <div className="flex gap-1">
+                          {[0, 1, 2].map((i) => (
+                            <motion.div
+                              key={i}
+                              className="w-1.5 h-1.5 rounded-full bg-gray-500"
+                              animate={{ y: [0, -4, 0] }}
+                              transition={{ duration: 0.6, repeat: Infinity, delay: i * 0.15 }}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  <div ref={messagesEndRef} />
+                </div>
+
+                {/* Input */}
+                <div className="px-4 py-3 border-t border-gray-800 flex gap-2">
+                  <input
+                    type="text"
+                    placeholder="Ask anything about your PDF…"
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
+                    className="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-600 focus:outline-none focus:border-purple-500 transition-colors"
+                  />
+                  <button
+                    onClick={sendMessage}
+                    disabled={!input.trim() || isTyping}
+                    className="p-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                  >
+                    <Send className="w-4 h-4 text-white" />
+                  </button>
+                </div>
+              </>
+            )}
+          </motion.div>
+
+          {/* Sidebar */}
+          <div className="space-y-4">
+            <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-5">
+              <h3 className="text-sm font-bold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
+                <Zap className="w-4 h-4 text-yellow-400" />
+                How it works
+              </h3>
+              <ol className="space-y-3">
+                {howSteps.map((s, i) => (
+                  <li key={i} className="flex gap-2.5 text-sm text-gray-400">
+                    <span className="flex-shrink-0 w-5 h-5 rounded-full bg-gray-800 text-gray-500 flex items-center justify-center text-xs font-bold">
+                      {i + 1}
+                    </span>
+                    {s.title}
+                  </li>
+                ))}
+              </ol>
+            </div>
+
+            <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-5">
+              <h3 className="text-sm font-bold text-gray-900 dark:text-white mb-3 flex items-center gap-2">
+                <Shield className="w-4 h-4 text-green-400" />
+                Privacy
+              </h3>
+              <p className="text-sm text-gray-500 leading-relaxed">
+                Your file is encrypted in transit and deleted automatically after 30 minutes. We never read, store, or
+                sell your content.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {relatedTools.length > 0 && <RelatedTools tools={relatedTools} />}
+      </div>
+    </div>
+  )
+}
+
+// ─── Markdown Editor tool ─────────────────────────────────────────────────────
+
+const MARKDOWN_PLACEHOLDER = `# Welcome to Markdown Editor
+
+Write your content here using **Markdown** syntax.
+
+## Features
+- Live character and word count
+- Download as **.md** file
+- Clean, distraction-free interface
+
+### Formatting examples
+Use *italic* or **bold** text, \`inline code\`, and more.
+
+---
+
+Start typing to see your document take shape.
+`
+
+function MarkdownEditorTool({
+  tool,
+  category,
+  relatedTools,
+}: {
+  tool: Tool
+  category: ToolCategory | undefined
+  relatedTools: Tool[]
+}) {
+  const [content, setContent] = useState(MARKDOWN_PLACEHOLDER)
+  const [tab, setTab] = useState<'write' | 'preview'>('write')
+  const [copied, setCopied] = useState(false)
+
+  const wordCount = content.trim() ? content.trim().split(/\s+/).length : 0
+  const charCount = content.length
+
+  const copyMarkdown = useCallback(async () => {
+    await navigator.clipboard.writeText(content)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }, [content])
+
+  const downloadMd = useCallback(() => {
+    const blob = new Blob([content], { type: 'text/markdown' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'document.md'
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [content])
+
+  return (
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
+      <Breadcrumb tool={tool} category={category} />
+
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Header */}
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4 }}
+          className="flex items-center gap-4 mb-6"
+        >
+          <div
+            className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0"
+            style={{ background: 'rgba(243, 156, 18, 0.15)', color: '#f39c12' }}
+          >
+            <ToolIcon name={tool.icon} className="w-6 h-6" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-black text-gray-900 dark:text-white tracking-tight">{tool.name}</h1>
+            <p className="text-gray-500 dark:text-gray-400 text-sm">{tool.description}</p>
+          </div>
+        </motion.div>
+
+        {/* Editor */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, delay: 0.08 }}
+          className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl overflow-hidden mb-8"
+        >
+          {/* Tab bar */}
+          <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-800">
+            <div className="flex gap-1">
+              {(['write', 'preview'] as const).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => setTab(t)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                    tab === t ? 'bg-gray-800 text-white' : 'text-gray-500 hover:text-gray-300'
+                  }`}
+                >
+                  {t === 'write' ? <FileText className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  {t === 'write' ? 'Write' : 'Preview'}
+                </button>
+              ))}
+            </div>
+            <div className="text-xs text-gray-600">
+              {wordCount} words · {charCount} chars
+            </div>
+          </div>
+
+          {/* Content area */}
+          <AnimatePresence mode="wait">
+            {tab === 'write' ? (
+              <motion.div
+                key="write"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.15 }}
+              >
+                <textarea
+                  value={content}
+                  onChange={(e) => setContent(e.target.value)}
+                  className="w-full bg-transparent text-gray-300 text-sm font-mono leading-relaxed p-6 focus:outline-none resize-none min-h-[300px] sm:min-h-[400px] md:min-h-[480px]"
+                  placeholder="Start writing Markdown here…"
+                  spellCheck={false}
+                />
+              </motion.div>
+            ) : (
+              <motion.div
+                key="preview"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.15 }}
+                className="p-6 text-gray-400 text-sm leading-relaxed min-h-[300px] sm:min-h-[400px] md:min-h-[480px]"
+                style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'inherit' }}
+              >
+                {content || <span className="text-gray-700 italic">Nothing to preview yet.</span>}
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Footer toolbar */}
+          <div className="flex items-center gap-3 px-4 py-3 border-t border-gray-800">
+            <button
+              onClick={copyMarkdown}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-gray-800 text-gray-400 hover:text-white text-xs font-semibold transition-colors"
+            >
+              <Copy className="w-3.5 h-3.5" />
+              {copied ? 'Copied!' : 'Copy Markdown'}
+            </button>
+            <button
+              onClick={downloadMd}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-gray-800 text-gray-400 hover:text-white text-xs font-semibold transition-colors"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Download .md
+            </button>
+            <button
+              onClick={() => setContent('')}
+              className="ml-auto inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-gray-700 hover:text-gray-400 text-xs font-semibold transition-colors"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Clear
+            </button>
+          </div>
+        </motion.div>
+
+        {relatedTools.length > 0 && <RelatedTools tools={relatedTools} />}
+      </div>
+    </div>
+  )
+}
+
+// ─── File Tool Interface ──────────────────────────────────────────────────────
+
+function FileToolInterface({
+  tool,
+  category,
+  relatedTools,
+}: {
+  tool: Tool
+  category: ToolCategory | undefined
+  relatedTools: Tool[]
+}) {
+  const rgb = hexToRgb(tool.color)
+  const accept = getAccept(tool)
+  const acceptLabel = getAcceptLabel(accept)
+  const allowMultiple = ['merge-pdf', 'jpg-to-pdf'].includes(tool.id)
+  const hasOptions = TOOLS_WITH_OPTIONS.includes(tool.id)
+
+  const [stage, setStage]       = useState<Stage>('idle')
+  const [files, setFiles]       = useState<File[]>([])
+  const [progress, setProgress] = useState(0)
+  const [statusMsg, setStatusMsg] = useState('')
+  const [options, setOptions]   = useState<OptionsState>(() => getDefaultOptions(tool.id))
+  const [outputBlob, setOutputBlob] = useState<Blob | null>(null)
+  const [outputUrl, setOutputUrl]   = useState('')
+  const [outputExt, setOutputExt]   = useState('')
+  const [errorMsg, setErrorMsg]     = useState('')
+  const progressInterval = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (progressInterval.current) clearInterval(progressInterval.current)
+      if (outputUrl) URL.revokeObjectURL(outputUrl)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const onDrop = useCallback((accepted: File[]) => {
+    if (accepted.length === 0) return
+    setFiles((prev) => (allowMultiple ? [...prev, ...accepted] : accepted))
+    setStage('ready')
+    setProgress(0)
+  }, [allowMultiple])
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept,
+    maxFiles: allowMultiple ? 20 : 1,
+    multiple: allowMultiple,
+    disabled: stage === 'processing',
+  })
+
+  const removeFile = useCallback((idx: number) => {
+    setFiles((prev) => {
+      const next = prev.filter((_, i) => i !== idx)
+      if (next.length === 0) setStage('idle')
+      return next
+    })
+  }, [])
+
+  const startProcessing = useCallback(async () => {
+    setStage('processing')
+    setProgress(0)
+    setStatusMsg('')
+    setErrorMsg('')
+    if (outputUrl) URL.revokeObjectURL(outputUrl)
+    setOutputUrl('')
+    setOutputBlob(null)
+    setOutputExt('')
+
+    const onProgress = (pct: number, msg: string) => {
+      setProgress(pct)
+      setStatusMsg(msg)
+    }
+
+    // ── SERVER TOOLS — call FastAPI backend ───────────────────────────────
+    if (SERVER_TOOLS.has(tool.id)) {
+      try {
+        const blob = await runServerTool(tool.id, files, options, onProgress)
+        const ext = getServerOutputExt(tool.id, options.outputFormat)
+        const url = URL.createObjectURL(blob)
+        setOutputBlob(blob)
+        setOutputUrl(url)
+        setOutputExt(ext)
+        setProgress(100)
+        setTimeout(() => setStage('done'), 250)
+      } catch (err) {
+        setErrorMsg((err as Error).message || 'Server processing failed.')
+        setStage('error')
+      }
+      return
+    }
+
+    // ── If this tool is not yet fully implemented, run a demo simulation ──
+    if (!REAL_TOOLS.has(tool.id)) {
+      let p = 0
+      progressInterval.current = setInterval(() => {
+        p += Math.random() * 12 + 5
+        if (p >= 90) {
+          clearInterval(progressInterval.current!)
+          setProgress(100)
+          setTimeout(() => setStage('done'), 350)
+          return
+        }
+        setProgress(Math.min(p, 90))
+      }, 320)
+      return
+    }
+
+    // ── Real client-side processing (pdf-lib / WebAssembly) ───────────────
+    try {
+      let blob: Blob
+
+      switch (tool.id) {
+        // ── PDF ────────────────────────────────────────────────────────────
+        case 'compress-pdf': {
+          const { compressPdf } = await import('@/lib/processors/pdf')
+          blob = await compressPdf(files[0], options.compressionLevel as 'low' | 'medium' | 'high', onProgress)
+          break
+        }
+        case 'merge-pdf': {
+          const { mergePdf } = await import('@/lib/processors/pdf')
+          blob = await mergePdf(files, onProgress)
+          break
+        }
+        case 'split-pdf': {
+          const { splitPdf } = await import('@/lib/processors/pdf')
+          blob = await splitPdf(files[0], options.pageRange, onProgress)
+          break
+        }
+        case 'rotate-pdf': {
+          const { rotatePdf } = await import('@/lib/processors/pdf')
+          blob = await rotatePdf(files[0], options.pageRange, options.rotation, onProgress)
+          break
+        }
+        case 'delete-pages': {
+          const { deletePagesPdf } = await import('@/lib/processors/pdf')
+          blob = await deletePagesPdf(files[0], options.pageRange, onProgress)
+          break
+        }
+        case 'extract-pages': {
+          const { extractPagesPdf } = await import('@/lib/processors/pdf')
+          blob = await extractPagesPdf(files[0], options.pageRange, onProgress)
+          break
+        }
+        case 'number-pages': {
+          const { numberPagesPdf } = await import('@/lib/processors/pdf')
+          blob = await numberPagesPdf(files[0], onProgress)
+          break
+        }
+        case 'protect-pdf': {
+          const { protectPdf } = await import('@/lib/processors/pdf')
+          blob = await protectPdf(files[0], options.password, onProgress)
+          break
+        }
+        case 'watermark-pdf': {
+          const { watermarkPdf } = await import('@/lib/processors/pdf')
+          blob = await watermarkPdf(files[0], options.watermarkText, onProgress)
+          break
+        }
+        case 'flatten-pdf': {
+          const { flattenPdf } = await import('@/lib/processors/pdf')
+          blob = await flattenPdf(files[0], onProgress)
+          break
+        }
+        // ── OCR ────────────────────────────────────────────────────────────
+        case 'pdf-ocr': {
+          const { ocrPdf } = await import('@/lib/processors/ocr')
+          blob = await ocrPdf(files[0], onProgress)
+          break
+        }
+        case 'ocr-image-to-text': {
+          const { ocrImage } = await import('@/lib/processors/ocr')
+          blob = await ocrImage(files[0], onProgress)
+          break
+        }
+        // ── Image ──────────────────────────────────────────────────────────
+        case 'image-compress': {
+          const { compressImage } = await import('@/lib/processors/image')
+          const q = options.compressionLevel === 'low' ? 40 : options.compressionLevel === 'high' ? 90 : 70
+          blob = await compressImage(files[0], q, onProgress)
+          break
+        }
+        case 'image-resize': {
+          const { resizeImage } = await import('@/lib/processors/image')
+          blob = await resizeImage(
+            files[0],
+            options.width  ? parseInt(options.width,  10) : null,
+            options.height ? parseInt(options.height, 10) : null,
+            onProgress,
+          )
+          break
+        }
+        case 'image-convert': {
+          const { convertImage } = await import('@/lib/processors/image')
+          blob = await convertImage(files[0], options.outputFormat, onProgress)
+          break
+        }
+        case 'strip-exif': {
+          const { stripExif } = await import('@/lib/processors/image')
+          blob = await stripExif(files[0], onProgress)
+          break
+        }
+        default:
+          throw new Error('Processing not implemented for this tool yet.')
+      }
+
+      const url = URL.createObjectURL(blob)
+      setOutputBlob(blob)
+      setOutputUrl(url)
+      setOutputExt(extFromMime(blob.type))
+      setProgress(100)
+      setTimeout(() => setStage('done'), 250)
+    } catch (err) {
+      setErrorMsg((err as Error).message || 'An unexpected error occurred.')
+      setStage('error')
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [files, options, tool.id, outputUrl])
+
+  const reset = useCallback(() => {
+    if (progressInterval.current) clearInterval(progressInterval.current)
+    if (outputUrl) URL.revokeObjectURL(outputUrl)
+    setStage('idle')
+    setFiles([])
+    setProgress(0)
+    setStatusMsg('')
+    setOutputBlob(null)
+    setOutputUrl('')
+    setOutputExt('')
+    setErrorMsg('')
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [outputUrl])
+
+  const resolvedExt = outputExt || getOutputExtension(tool)
+  const outputName =
+    files[0]
+      ? files[0].name.replace(/\.[^.]+$/, '') + '_processed.' + resolvedExt
+      : 'output.' + resolvedExt
+
+  const howToSteps = getHowToSteps(tool)
+
+  return (
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
+      <Breadcrumb tool={tool} category={category} />
+
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Tool header */}
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4 }}
+          className="flex items-center gap-4 mb-8"
+        >
+          <div
+            className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0"
+            style={{ background: `rgba(${rgb}, 0.15)`, color: tool.color }}
+          >
+            <ToolIcon name={tool.icon} className="w-6 h-6" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-black text-gray-900 dark:text-white tracking-tight">{tool.name}</h1>
+            <p className="text-gray-500 dark:text-gray-400 text-sm">{tool.description}</p>
+          </div>
+          {category && (
+            <span
+              className="hidden sm:inline-flex ml-auto text-xs font-bold uppercase tracking-wider px-3 py-1.5 rounded-full"
+              style={{ background: `rgba(${rgb}, 0.1)`, color: tool.color }}
+            >
+              {category.name}
+            </span>
+          )}
+        </motion.div>
+
+        {/* Main widget */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4, delay: 0.08 }}
+          className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl overflow-hidden mb-8"
+        >
+          <AnimatePresence mode="wait">
+            {/* ── IDLE ── */}
+            {stage === 'idle' && (
+              <motion.div
+                key="idle"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                className="p-6 sm:p-10"
+              >
+                <div
+                  {...getRootProps()}
+                  className={`rounded-xl p-10 sm:p-16 text-center cursor-pointer transition-colors duration-200 ${
+                    isDragActive
+                      ? 'border-march bg-purple-500/5'
+                      : 'border-2 border-dashed border-gray-300 dark:border-gray-700 hover:border-gray-400 dark:hover:border-gray-600 hover:bg-gray-100/60 dark:hover:bg-gray-800/20'
+                  }`}
+                >
+                  <input {...getInputProps()} />
+                  <motion.div
+                    animate={isDragActive ? { y: [-3, 3, -3], scale: 1.08 } : { y: 0, scale: 1 }}
+                    transition={{ duration: 0.6, repeat: isDragActive ? Infinity : 0, ease: 'easeInOut' }}
+                    className="w-16 h-16 rounded-2xl bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 flex items-center justify-center mx-auto mb-5"
+                  >
+                    <Upload
+                      className={`w-7 h-7 transition-colors ${isDragActive ? 'text-purple-400' : 'text-gray-500'}`}
+                    />
+                  </motion.div>
+                  <p className="text-gray-900 dark:text-white font-semibold text-lg mb-2">
+                    {isDragActive ? 'Drop it!' : `Drop your ${acceptLabel} here`}
+                  </p>
+                  <p className="text-gray-500 text-sm mb-6">or click to browse files</p>
+                  <span className="inline-flex items-center gap-1.5 text-xs text-gray-600">
+                    <Shield className="w-3.5 h-3.5" />
+                    Files deleted in 30 min · No account needed
+                  </span>
+                </div>
+              </motion.div>
+            )}
+
+            {/* ── READY ── */}
+            {stage === 'ready' && (
+              <motion.div
+                key="ready"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                className="p-6 sm:p-8"
+              >
+                {/* File list */}
+                <div className="space-y-2 mb-5">
+                  {files.map((file, i) => (
+                    <motion.div
+                      key={i}
+                      initial={{ opacity: 0, x: -14 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ duration: 0.24, delay: i * 0.05 }}
+                      className="flex items-center gap-3 bg-gray-800 rounded-xl px-4 py-3"
+                    >
+                      <motion.div
+                        initial={{ scale: 0.55, rotate: -10 }}
+                        animate={{ scale: 1, rotate: 0 }}
+                        transition={{ type: 'spring', stiffness: 300, damping: 18, delay: i * 0.05 + 0.06 }}
+                        className="w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0"
+                        style={{ background: `rgba(${rgb}, 0.12)`, color: tool.color }}
+                      >
+                        <FileText className="w-4 h-4" />
+                      </motion.div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm text-white font-medium truncate">{file.name}</p>
+                        <p className="text-xs text-gray-500">{formatBytes(file.size)}</p>
+                      </div>
+                      <button
+                        onClick={() => removeFile(i)}
+                        className="p-1.5 rounded text-gray-600 hover:text-gray-400 transition-colors"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </motion.div>
+                  ))}
+                </div>
+
+                {/* Add more files (merge tools) */}
+                {allowMultiple && (
+                  <div
+                    {...getRootProps()}
+                    className="border border-dashed border-gray-700 rounded-xl px-4 py-3 flex items-center gap-2 cursor-pointer hover:border-gray-600 hover:bg-gray-800/20 transition-all mb-5"
+                  >
+                    <input {...getInputProps()} />
+                    <Plus className="w-4 h-4 text-gray-500" />
+                    <span className="text-sm text-gray-500">Add more files</span>
+                  </div>
+                )}
+
+                {/* Options */}
+                {hasOptions && (
+                  <div className="mb-5 bg-gray-800/50 rounded-xl p-4">
+                    <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Options</h3>
+                    <ToolOptions
+                      toolId={tool.id}
+                      options={options}
+                      onChange={(patch) => setOptions((prev) => ({ ...prev, ...patch }))}
+                    />
+                  </div>
+                )}
+
+                {/* Actions */}
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => { void startProcessing() }}
+                    className="flex-1 py-3.5 rounded-xl text-sm font-bold text-white transition-all hover:opacity-90 active:scale-[0.98]"
+                    style={{ background: tool.color, boxShadow: `0 4px 24px rgba(${rgb}, 0.3)` }}
+                  >
+                    {tool.name}
+                  </button>
+                  <button
+                    onClick={reset}
+                    className="px-4 py-3.5 rounded-xl border border-gray-700 text-gray-400 hover:text-white hover:border-gray-600 transition-colors"
+                    title="Start over"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                  </button>
+                </div>
+              </motion.div>
+            )}
+
+            {/* ── PROCESSING ── */}
+            {stage === 'processing' && (
+              <motion.div
+                key="processing"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                className="p-8 sm:p-12 text-center"
+              >
+                <div
+                  className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-5"
+                  style={{ background: `rgba(${rgb}, 0.12)`, color: tool.color }}
+                >
+                  <Loader2 className="w-8 h-8 animate-spin" />
+                </div>
+                <p className="text-gray-900 dark:text-white font-semibold text-lg mb-1">Processing…</p>
+                <p className="text-gray-500 text-sm mb-8 min-h-[20px]">
+                  {statusMsg || (
+                    progress < 35  ? 'Analysing your file…' :
+                    progress < 65  ? 'Applying transformations…' :
+                    progress < 88  ? 'Almost there…' :
+                    'Finalising…'
+                  )}
+                </p>
+                <div className="max-w-sm mx-auto">
+                  <div className="flex justify-between text-xs text-gray-500 mb-2">
+                    <span>Progress</span>
+                    <span>{Math.round(progress)}%</span>
+                  </div>
+                  <div className="h-2 bg-gray-200 dark:bg-gray-800 rounded-full overflow-hidden">
+                    <motion.div
+                      className="h-full rounded-full relative overflow-hidden"
+                      style={{ background: tool.color }}
+                      animate={{ width: `${progress}%` }}
+                      transition={{ duration: 0.3, ease: 'easeOut' as const }}
+                    >
+                      <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/25 to-transparent animate-shimmer" />
+                    </motion.div>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {/* ── DONE ── */}
+            {stage === 'done' && (
+              <motion.div
+                key="done"
+                initial={{ opacity: 0, scale: 0.97 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.25 }}
+                className="p-8 sm:p-12 text-center"
+              >
+                <motion.div
+                  initial={{ scale: 0 }}
+                  animate={{ scale: 1 }}
+                  transition={{ type: 'spring', stiffness: 220, damping: 16, delay: 0.05 }}
+                  className="w-16 h-16 rounded-full bg-green-500/15 flex items-center justify-center mx-auto mb-5"
+                >
+                  <svg
+                    viewBox="0 0 36 36"
+                    fill="none"
+                    className="w-9 h-9"
+                    strokeWidth={3}
+                    stroke="#4ade80"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <motion.path
+                      d="M6 18l8 8L30 10"
+                      initial={{ pathLength: 0, opacity: 0 }}
+                      animate={{ pathLength: 1, opacity: 1 }}
+                      transition={{ duration: 0.5, ease: 'easeOut' as const, delay: 0.3 }}
+                    />
+                  </svg>
+                </motion.div>
+                <h2 className="text-gray-900 dark:text-white font-black text-xl mb-2">Done!</h2>
+                <p className="text-gray-400 text-sm mb-1">Your file is ready — processed entirely in your browser.</p>
+                {outputBlob && files[0] && (
+                  <p className="text-xs text-gray-600 mb-6 flex items-center justify-center gap-1.5">
+                    <span>{formatBytes(files[0].size)}</span>
+                    <span className="text-gray-700">→</span>
+                    <span className={outputBlob.size < files[0].size ? 'text-green-400' : 'text-gray-400'}>
+                      {formatBytes(outputBlob.size)}
+                    </span>
+                    {outputBlob.size < files[0].size && (
+                      <span className="text-green-400">
+                        ({Math.round((1 - outputBlob.size / files[0].size) * 100)}% smaller)
+                      </span>
+                    )}
+                  </p>
+                )}
+                {!outputBlob && <div className="mb-7" />}
+                <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                  <a
+                    href={outputUrl || '#'}
+                    download={outputName}
+                    onClick={!outputUrl ? (e) => e.preventDefault() : undefined}
+                    className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-8 py-3.5 rounded-xl text-white font-bold text-sm transition-all hover:opacity-90 active:scale-[0.98]"
+                    style={{ background: tool.color, boxShadow: `0 4px 24px rgba(${rgb}, 0.3)` }}
+                  >
+                    <Download className="w-4 h-4" />
+                    Download {outputName}
+                  </a>
+                  <button
+                    onClick={reset}
+                    className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl border border-gray-700 text-gray-400 hover:text-white hover:border-gray-600 text-sm font-semibold transition-colors"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                    Process another
+                  </button>
+                </div>
+              </motion.div>
+            )}
+
+            {/* ── ERROR ── */}
+            {stage === 'error' && (
+              <motion.div
+                key="error"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                className="p-8 sm:p-12 text-center"
+              >
+                <div className="w-16 h-16 rounded-2xl bg-red-500/10 flex items-center justify-center mx-auto mb-5">
+                  <AlertCircle className="w-8 h-8 text-red-400" />
+                </div>
+                <p className="text-white font-semibold mb-2">Something went wrong</p>
+                <p className="text-gray-500 text-sm mb-6 max-w-sm mx-auto">
+                  {errorMsg || 'Please try again with a different file.'}
+                </p>
+                <button
+                  onClick={reset}
+                  className="px-6 py-3 rounded-xl bg-gray-800 text-gray-300 text-sm font-semibold hover:bg-gray-700 transition-colors"
+                >
+                  Try again
+                </button>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </motion.div>
+
+        {/* Privacy badges */}
+        <div className="flex flex-wrap items-center justify-center gap-5 text-xs text-gray-600 mb-14">
+          <Tooltip label="Permanently deleted from our servers within 30 minutes">
+            <span className="flex items-center gap-1.5 cursor-default">
+              <Shield className="w-3.5 h-3.5 text-green-500" />
+              Files deleted in 30 min
+            </span>
+          </Tooltip>
+          <Tooltip label="No sign-up, no email, no profile — open and use">
+            <span className="flex items-center gap-1.5 cursor-default">
+              <Zap className="w-3.5 h-3.5 text-yellow-500" />
+              No account needed
+            </span>
+          </Tooltip>
+          <Tooltip label="Your processed file is clean — no branding added">
+            <span className="flex items-center gap-1.5 cursor-default">
+              <CheckCircle className="w-3.5 h-3.5 text-blue-500" />
+              No watermarks
+            </span>
+          </Tooltip>
+          <Tooltip label="We do not collect, share, or sell any of your data">
+            <span className="flex items-center gap-1.5 cursor-default">
+              <Trash2 className="w-3.5 h-3.5 text-red-400" />
+              No data sold
+            </span>
+          </Tooltip>
+        </div>
+
+        <HowToSection steps={howToSteps} color={tool.color} />
+
+        {relatedTools.length > 0 && <RelatedTools tools={relatedTools} />}
+      </div>
+    </div>
+  )
+}
+
+// ─── Merge PDF Canvas Interface ───────────────────────────────────────────────
+
+async function generatePdfThumb(file: File): Promise<{ thumb: string; pages: number }> {
+  const pdfjsLib = await import('pdfjs-dist')
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    `https://cdn.jsdelivr.net/npm/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.js`
+  const buf = await file.arrayBuffer()
+  const doc = await pdfjsLib.getDocument({ data: new Uint8Array(buf) }).promise
+  const page = await doc.getPage(1)
+  const viewport = page.getViewport({ scale: 0.4 })
+  const canvas = document.createElement('canvas')
+  canvas.width  = Math.floor(viewport.width)
+  canvas.height = Math.floor(viewport.height)
+  await page.render({ canvasContext: canvas.getContext('2d')!, viewport }).promise
+  return { thumb: canvas.toDataURL('image/jpeg', 0.75), pages: doc.numPages }
+}
+
+function MergePdfInterface({
+  tool,
+  category,
+  relatedTools,
+}: {
+  tool: Tool
+  category: ToolCategory | undefined
+  relatedTools: Tool[]
+}) {
+  const rgb = hexToRgb(tool.color)
+
+  const [files,      setFiles]      = useState<File[]>([])
+  const [thumbs,     setThumbs]     = useState<string[]>([])
+  const [pageCounts, setPageCounts] = useState<number[]>([])
+  const [dragIdx,    setDragIdx]    = useState<number | null>(null)
+  const [dropIdx,    setDropIdx]    = useState<number | null>(null)
+  const [stage,      setStage]      = useState<Stage>('idle')
+  const [progress,   setProgress]   = useState(0)
+  const [statusMsg,  setStatusMsg]  = useState('')
+  const [outputBlob, setOutputBlob] = useState<Blob | null>(null)
+  const [outputUrl,  setOutputUrl]  = useState('')
+  const [errorMsg,   setErrorMsg]   = useState('')
+
+  const filesRef = useRef(files)
+  filesRef.current = files
+
+  const addFiles = useCallback(async (newFiles: File[]) => {
+    const pdfs = newFiles.filter(
+      (f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'),
+    )
+    if (!pdfs.length) return
+    const startIdx = filesRef.current.length
+    setFiles((prev) => [...prev, ...pdfs])
+    setThumbs((prev) => [...prev, ...pdfs.map(() => '')])
+    setPageCounts((prev) => [...prev, ...pdfs.map(() => 0)])
+    pdfs.forEach(async (file, i) => {
+      try {
+        const { thumb, pages } = await generatePdfThumb(file)
+        setThumbs((prev) => { const a = [...prev]; a[startIdx + i] = thumb; return a })
+        setPageCounts((prev) => { const a = [...prev]; a[startIdx + i] = pages; return a })
+      } catch {
+        setThumbs((prev) => { const a = [...prev]; a[startIdx + i] = 'err'; return a })
+      }
+    })
+  }, [])
+
+  const { getRootProps, getInputProps, open } = useDropzone({
+    onDrop: addFiles,
+    accept: { 'application/pdf': ['.pdf'] },
+    multiple: true,
+    noClick: files.length > 0,
+    noKeyboard: files.length > 0,
+  })
+
+  const removeFile = (idx: number) => {
+    setFiles((p) => p.filter((_, i) => i !== idx))
+    setThumbs((p) => p.filter((_, i) => i !== idx))
+    setPageCounts((p) => p.filter((_, i) => i !== idx))
+  }
+
+  const reorder = (from: number, to: number) => {
+    const move = <T,>(arr: T[]): T[] => {
+      const a = [...arr]
+      const [item] = a.splice(from, 1)
+      a.splice(to, 0, item)
+      return a
+    }
+    setFiles(move)
+    setThumbs(move)
+    setPageCounts(move)
+  }
+
+  const startMerge = async () => {
+    if (files.length < 2) return
+    setStage('processing')
+    setProgress(5)
+    setStatusMsg('Loading PDFs…')
+    setErrorMsg('')
+    if (outputUrl) URL.revokeObjectURL(outputUrl)
+    setOutputUrl('')
+    setOutputBlob(null)
+    try {
+      const { mergePdf } = await import('@/lib/processors/pdf')
+      const blob = await mergePdf(files, (pct, msg) => { setProgress(pct); setStatusMsg(msg) })
+      const url = URL.createObjectURL(blob)
+      setOutputBlob(blob)
+      setOutputUrl(url)
+      setProgress(100)
+      setTimeout(() => setStage('done'), 300)
+    } catch (err) {
+      setErrorMsg((err as Error).message || 'Merge failed.')
+      setStage('error')
+    }
+  }
+
+  const reset = () => {
+    if (outputUrl) URL.revokeObjectURL(outputUrl)
+    setFiles([]); setThumbs([]); setPageCounts([])
+    setStage('idle'); setProgress(0)
+    setOutputBlob(null); setOutputUrl(''); setErrorMsg('')
+  }
+
+  const totalPages = pageCounts.reduce((s, c) => s + c, 0)
+  const outputName = 'merged.pdf'
+
+  return (
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
+      <Breadcrumb tool={tool} category={category} />
+
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Header */}
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4 }}
+          className="flex items-center gap-4 mb-6"
+        >
+          <div
+            className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0"
+            style={{ background: `rgba(${rgb}, 0.15)`, color: tool.color }}
+          >
+            <ToolIcon name={tool.icon} className="w-6 h-6" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-black text-gray-900 dark:text-white tracking-tight">{tool.name}</h1>
+            <p className="text-gray-500 dark:text-gray-400 text-sm">{tool.description}</p>
+          </div>
+        </motion.div>
+
+        <AnimatePresence mode="wait">
+          {/* ── BOARD ── */}
+          {(stage === 'idle') && (
+            <motion.div
+              key="board"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.3 }}
+            >
+              {/* Canvas */}
+              <div
+                {...(files.length === 0 ? getRootProps() : {})}
+                className={`min-h-[420px] bg-white dark:bg-gray-900 border-2 rounded-2xl p-5 transition-colors ${
+                  files.length === 0
+                    ? 'border-dashed border-gray-300 dark:border-gray-700 cursor-pointer hover:border-purple-400 dark:hover:border-purple-500'
+                    : 'border-gray-200 dark:border-gray-800'
+                }`}
+              >
+                {files.length === 0 ? (
+                  /* Empty dropzone */
+                  <div className="flex flex-col items-center justify-center h-72 text-center select-none">
+                    <input {...getInputProps()} />
+                    <div className="w-16 h-16 rounded-2xl bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 flex items-center justify-center mb-5">
+                      <Upload className="w-7 h-7 text-gray-400" />
+                    </div>
+                    <p className="text-gray-900 dark:text-white font-semibold text-lg mb-2">
+                      Drop your PDFs here
+                    </p>
+                    <p className="text-gray-500 text-sm mb-1">Add 2 or more files — drag cards to set the order</p>
+                    <p className="text-xs text-gray-400 flex items-center gap-1 mt-3">
+                      <Shield className="w-3 h-3" /> Files processed locally in your browser
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    {/* Toolbar */}
+                    <div className="flex items-center gap-3 mb-5 flex-wrap">
+                      <p className="text-sm text-gray-500 dark:text-gray-400">
+                        <span className="font-bold text-gray-900 dark:text-white">{files.length}</span> files
+                        {totalPages > 0 && (
+                          <> · <span className="font-bold text-gray-900 dark:text-white">{totalPages}</span> pages total</>
+                        )}
+                        <span className="hidden sm:inline"> · Drag to reorder</span>
+                      </p>
+                      <button
+                        onClick={open}
+                        className="ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:border-purple-400 dark:hover:border-purple-500 hover:text-purple-600 dark:hover:text-purple-400 transition-colors"
+                      >
+                        <Plus className="w-3.5 h-3.5" /> Add PDFs
+                      </button>
+                      <input {...getInputProps()} />
+                    </div>
+
+                    {/* Card grid */}
+                    <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 gap-3">
+                      {files.map((file, idx) => (
+                        <motion.div
+                          key={`${file.name}-${idx}-${file.size}`}
+                          layout
+                          draggable
+                          onDragStart={(e) => {
+                            (e as unknown as React.DragEvent).dataTransfer.effectAllowed = 'move'
+                            setDragIdx(idx)
+                          }}
+                          onDragOver={(e) => {
+                            (e as unknown as React.DragEvent).preventDefault()
+                            ;(e as unknown as React.DragEvent).dataTransfer.dropEffect = 'move'
+                            if (dropIdx !== idx) setDropIdx(idx)
+                          }}
+                          onDrop={(e) => {
+                            (e as unknown as React.DragEvent).preventDefault()
+                            if (dragIdx !== null && dragIdx !== idx) reorder(dragIdx, idx)
+                            setDragIdx(null)
+                            setDropIdx(null)
+                          }}
+                          onDragEnd={() => { setDragIdx(null); setDropIdx(null) }}
+                          className={`relative cursor-grab active:cursor-grabbing rounded-xl overflow-hidden border-2 transition-all select-none ${
+                            dragIdx === idx
+                              ? 'opacity-30 scale-95 border-gray-300 dark:border-gray-600'
+                              : dropIdx === idx && dragIdx !== null
+                              ? 'border-purple-500 scale-[1.04] shadow-lg shadow-purple-500/20'
+                              : 'border-gray-200 dark:border-gray-700 hover:border-gray-400 dark:hover:border-gray-500 hover:shadow-md'
+                          }`}
+                        >
+                          {/* Thumbnail */}
+                          <div className="aspect-[3/4] bg-gray-100 dark:bg-gray-800 flex items-center justify-center overflow-hidden">
+                            {thumbs[idx] && thumbs[idx] !== 'err' ? (
+                              <img
+                                src={thumbs[idx]}
+                                alt={file.name}
+                                className="w-full h-full object-contain"
+                                draggable={false}
+                              />
+                            ) : thumbs[idx] === 'err' ? (
+                              <AlertCircle className="w-6 h-6 text-red-400" />
+                            ) : (
+                              <Loader2 className="w-5 h-5 text-gray-400 animate-spin" />
+                            )}
+                          </div>
+
+                          {/* Order badge */}
+                          <div
+                            className="absolute top-1.5 left-1.5 min-w-[20px] h-5 px-1.5 rounded-full text-white text-[10px] font-black flex items-center justify-center shadow-md"
+                            style={{ background: tool.color }}
+                          >
+                            {idx + 1}
+                          </div>
+
+                          {/* Remove */}
+                          <button
+                            onClick={() => removeFile(idx)}
+                            className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-black/50 dark:bg-black/70 text-white flex items-center justify-center hover:bg-red-500 transition-colors"
+                            title="Remove"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+
+                          {/* Info */}
+                          <div className="px-2 pt-1.5 pb-2 bg-white dark:bg-gray-900 border-t border-gray-100 dark:border-gray-800">
+                            <p className="text-[10px] font-medium text-gray-700 dark:text-gray-300 truncate leading-tight">
+                              {file.name.replace(/\.pdf$/i, '')}
+                            </p>
+                            <p className="text-[9px] text-gray-400 mt-0.5">
+                              {pageCounts[idx] ? `${pageCounts[idx]}p` : '…'} · {formatBytes(file.size)}
+                            </p>
+                          </div>
+                        </motion.div>
+                      ))}
+
+                      {/* + Add card */}
+                      <button
+                        onClick={open}
+                        className="aspect-[3/4] rounded-xl border-2 border-dashed border-gray-300 dark:border-gray-700 flex flex-col items-center justify-center gap-2 hover:border-purple-400 dark:hover:border-purple-500 hover:bg-purple-50/50 dark:hover:bg-purple-900/10 transition-all group"
+                      >
+                        <div className="w-8 h-8 rounded-full bg-gray-100 dark:bg-gray-800 flex items-center justify-center group-hover:bg-purple-100 dark:group-hover:bg-purple-900/40 transition-colors">
+                          <Plus className="w-4 h-4 text-gray-400 group-hover:text-purple-500 transition-colors" />
+                        </div>
+                        <span className="text-[10px] font-medium text-gray-400 group-hover:text-purple-500 transition-colors">
+                          Add PDF
+                        </span>
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Action bar */}
+              <AnimatePresence>
+                {files.length >= 2 && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 8 }}
+                    transition={{ duration: 0.2 }}
+                    className="mt-4 flex items-center justify-between bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl px-5 py-3.5"
+                  >
+                    <p className="text-sm text-gray-500 dark:text-gray-400">
+                      Merging in order: <span className="font-bold text-gray-900 dark:text-white">1 → {files.length}</span>
+                    </p>
+                    <button
+                      onClick={startMerge}
+                      className="inline-flex items-center gap-2 px-7 py-2.5 rounded-xl text-sm font-bold text-white transition-all hover:opacity-90 active:scale-[0.98] shadow-md"
+                      style={{ background: tool.color, boxShadow: `0 4px 16px rgba(${rgb}, 0.35)` }}
+                    >
+                      <Zap className="w-4 h-4" />
+                      Merge {files.length} PDFs
+                    </button>
+                  </motion.div>
+                )}
+                {files.length === 1 && (
+                  <motion.p
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    className="mt-3 text-center text-sm text-gray-400"
+                  >
+                    Add at least one more PDF to merge
+                  </motion.p>
+                )}
+              </AnimatePresence>
+            </motion.div>
+          )}
+
+          {/* ── PROCESSING ── */}
+          {stage === 'processing' && (
+            <motion.div
+              key="processing"
+              initial={{ opacity: 0, scale: 0.97 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0 }}
+              className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-16 text-center"
+            >
+              <div className="w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-5" style={{ background: `rgba(${rgb}, 0.12)`, color: tool.color }}>
+                <Loader2 className="w-8 h-8 animate-spin" />
+              </div>
+              <p className="text-gray-900 dark:text-white font-semibold text-lg mb-1">Merging…</p>
+              <p className="text-gray-500 text-sm mb-8 min-h-[20px]">{statusMsg}</p>
+              <div className="max-w-xs mx-auto">
+                <div className="flex justify-between text-xs text-gray-500 mb-2">
+                  <span>Progress</span><span>{Math.round(progress)}%</span>
+                </div>
+                <div className="h-2 bg-gray-200 dark:bg-gray-800 rounded-full overflow-hidden">
+                  <motion.div
+                    className="h-full rounded-full relative overflow-hidden"
+                    style={{ background: tool.color }}
+                    animate={{ width: `${progress}%` }}
+                    transition={{ duration: 0.3, ease: 'easeOut' as const }}
+                  >
+                    <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/25 to-transparent animate-shimmer" />
+                  </motion.div>
+                </div>
+              </div>
+            </motion.div>
+          )}
+
+          {/* ── DONE ── */}
+          {stage === 'done' && (
+            <motion.div
+              key="done"
+              initial={{ opacity: 0, scale: 0.97 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0 }}
+              className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-16 text-center"
+            >
+              <motion.div
+                initial={{ scale: 0.5, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ type: 'spring' as const, stiffness: 300, damping: 20 }}
+                className="w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-5"
+                style={{ background: `rgba(${rgb}, 0.12)` }}
+              >
+                <svg viewBox="0 0 36 36" fill="none" stroke={tool.color} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" className="w-9 h-9">
+                  <motion.path
+                    d="M6 18l8 8L30 10"
+                    initial={{ pathLength: 0, opacity: 0 }}
+                    animate={{ pathLength: 1, opacity: 1 }}
+                    transition={{ duration: 0.5, ease: 'easeOut' as const, delay: 0.2 }}
+                  />
+                </svg>
+              </motion.div>
+              <h2 className="text-gray-900 dark:text-white font-black text-xl mb-2">Merged!</h2>
+              {outputBlob && (
+                <p className="text-xs text-gray-500 mb-6 flex items-center justify-center gap-1.5">
+                  <span>{files.length} PDFs</span>
+                  <span className="text-gray-400">→</span>
+                  <span className="text-green-500 font-medium">{formatBytes(outputBlob.size)}</span>
+                </p>
+              )}
+              <div className="flex flex-col sm:flex-row items-center justify-center gap-3 mt-2">
+                <a
+                  href={outputUrl || '#'}
+                  download={outputName}
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-8 py-3.5 rounded-xl text-white font-bold text-sm transition-all hover:opacity-90 active:scale-[0.98]"
+                  style={{ background: tool.color, boxShadow: `0 4px 24px rgba(${rgb}, 0.3)` }}
+                >
+                  <Download className="w-4 h-4" /> Download {outputName}
+                </a>
+                <button
+                  onClick={reset}
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl border border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:border-gray-400 dark:hover:border-gray-600 text-sm font-semibold transition-colors"
+                >
+                  <RotateCcw className="w-4 h-4" /> Merge more PDFs
+                </button>
+              </div>
+            </motion.div>
+          )}
+
+          {/* ── ERROR ── */}
+          {stage === 'error' && (
+            <motion.div
+              key="error"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="bg-white dark:bg-gray-900 border border-red-200 dark:border-red-900/40 rounded-2xl p-14 text-center"
+            >
+              <div className="w-14 h-14 rounded-full bg-red-50 dark:bg-red-900/20 flex items-center justify-center mx-auto mb-4">
+                <AlertCircle className="w-7 h-7 text-red-500" />
+              </div>
+              <h3 className="text-gray-900 dark:text-white font-bold text-lg mb-2">Merge failed</h3>
+              <p className="text-red-500 dark:text-red-400 text-sm mb-6 max-w-sm mx-auto">{errorMsg}</p>
+              <button
+                onClick={reset}
+                className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white text-sm font-semibold transition-colors"
+              >
+                <RotateCcw className="w-4 h-4" /> Try again
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {relatedTools.length > 0 && stage === 'idle' && <RelatedTools tools={relatedTools} />}
+      </div>
+    </div>
+  )
+}
+
+// ─── Organize PDF Interface ────────────────────────────────────────────────────
+
+type OrgPage = {
+  originalIndex: number
+  thumb: string
+  rotation: number // user-added rotation: 0, 90, 180, 270
+}
+
+async function loadAllPageThumbs(
+  file: File,
+  onProgress: (done: number, total: number) => void,
+): Promise<OrgPage[]> {
+  const pdfjsLib = await import('pdfjs-dist')
+  pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`
+  const buf = await file.arrayBuffer()
+  const doc = await pdfjsLib.getDocument({ data: buf }).promise
+  const pages: OrgPage[] = []
+  for (let i = 0; i < doc.numPages; i++) {
+    const page = await doc.getPage(i + 1)
+    const vp = page.getViewport({ scale: 0.35 })
+    const canvas = document.createElement('canvas')
+    canvas.width = vp.width
+    canvas.height = vp.height
+    await page.render({ canvasContext: canvas.getContext('2d')!, viewport: vp }).promise
+    pages.push({ originalIndex: i, thumb: canvas.toDataURL(), rotation: 0 })
+    onProgress(i + 1, doc.numPages)
+  }
+  return pages
+}
+
+function OrganizePdfInterface({
+  tool,
+  category,
+  relatedTools,
+}: {
+  tool: Tool
+  category: ToolCategory | undefined
+  relatedTools: Tool[]
+}) {
+  const rgb = hexToRgb(tool.color)
+  const [file, setFile] = useState<File | null>(null)
+  const [pages, setPages] = useState<OrgPage[]>([])
+  const [stage, setStage] = useState<'idle' | 'loading' | 'ready' | 'processing' | 'done' | 'error'>('idle')
+  const [loadProgress, setLoadProgress] = useState({ done: 0, total: 0 })
+  const [processProgress, setProcessProgress] = useState(0)
+  const [outputBlob, setOutputBlob] = useState<Blob | null>(null)
+  const [errorMsg, setErrorMsg] = useState('')
+  const [dragIdx, setDragIdx] = useState<number | null>(null)
+  const [dropIdx, setDropIdx] = useState<number | null>(null)
+
+  const onDrop = useCallback(async (acceptedFiles: File[]) => {
+    const f = acceptedFiles[0]
+    if (!f) return
+    setFile(f)
+    setStage('loading')
+    setLoadProgress({ done: 0, total: 0 })
+    try {
+      const result = await loadAllPageThumbs(f, (done, total) => setLoadProgress({ done, total }))
+      setPages(result)
+      setStage('ready')
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to load PDF')
+      setStage('error')
+    }
+  }, [])
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: PDF_ACCEPT,
+    maxFiles: 1,
+    disabled: stage !== 'idle',
+  })
+
+  const reset = useCallback(() => {
+    setFile(null)
+    setPages([])
+    setStage('idle')
+    setOutputBlob(null)
+    setErrorMsg('')
+    setLoadProgress({ done: 0, total: 0 })
+    setProcessProgress(0)
+  }, [])
+
+  const rotatePage = useCallback((idx: number, dir: 1 | -1) => {
+    setPages(prev => prev.map((p, i) => i === idx ? { ...p, rotation: (p.rotation + dir * 90 + 360) % 360 } : p))
+  }, [])
+
+  const deletePage = useCallback((idx: number) => {
+    setPages(prev => prev.filter((_, i) => i !== idx))
+  }, [])
+
+  const handleDragStart = (i: number) => (e: React.DragEvent) => {
+    setDragIdx(i)
+    e.dataTransfer.effectAllowed = 'move'
+  }
+
+  const handleDragOver = (i: number) => (e: React.DragEvent) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+    setDropIdx(i)
+  }
+
+  const handleDrop = (i: number) => (e: React.DragEvent) => {
+    e.preventDefault()
+    if (dragIdx === null || dragIdx === i) {
+      setDragIdx(null)
+      setDropIdx(null)
+      return
+    }
+    setPages(prev => {
+      const next = [...prev]
+      const [moved] = next.splice(dragIdx, 1)
+      next.splice(i, 0, moved)
+      return next
+    })
+    setDragIdx(null)
+    setDropIdx(null)
+  }
+
+  const handleDragEnd = () => {
+    setDragIdx(null)
+    setDropIdx(null)
+  }
+
+  const applyChanges = useCallback(async () => {
+    if (!file || pages.length === 0) return
+    setStage('processing')
+    setProcessProgress(0)
+    try {
+      const { PDFDocument, degrees } = await import('pdf-lib')
+      const srcBytes = await file.arrayBuffer()
+      const srcDoc = await PDFDocument.load(srcBytes)
+      const outDoc = await PDFDocument.create()
+      for (let i = 0; i < pages.length; i++) {
+        const p = pages[i]
+        const [copiedPage] = await outDoc.copyPages(srcDoc, [p.originalIndex])
+        if (p.rotation !== 0) {
+          const existingAngle = copiedPage.getRotation().angle
+          copiedPage.setRotation(degrees((existingAngle + p.rotation) % 360))
+        }
+        outDoc.addPage(copiedPage)
+        setProcessProgress(Math.round(((i + 1) / pages.length) * 100))
+      }
+      const bytes = await outDoc.save()
+      setOutputBlob(new Blob([bytes.buffer as ArrayBuffer], { type: 'application/pdf' }))
+      setStage('done')
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Processing failed')
+      setStage('error')
+    }
+  }, [file, pages])
+
+  const download = useCallback(() => {
+    if (!outputBlob || !file) return
+    const url = URL.createObjectURL(outputBlob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = file.name.replace(/\.pdf$/i, '_organized.pdf')
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [outputBlob, file])
+
+  return (
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
+      <Breadcrumb tool={tool} category={category} />
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+
+        {/* Header */}
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="flex items-center gap-4 mb-8"
+        >
+          <div
+            className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0"
+            style={{ background: `rgba(${rgb}, 0.15)`, color: tool.color }}
+          >
+            <ToolIcon name={tool.icon} className="w-6 h-6" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-black text-gray-900 dark:text-white tracking-tight">{tool.name}</h1>
+            <p className="text-gray-500 dark:text-gray-400 text-sm">{tool.description}</p>
+          </div>
+        </motion.div>
+
+        <AnimatePresence mode="wait">
+
+          {/* ── IDLE ── */}
+          {stage === 'idle' && (
+            <motion.div key="idle" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+              <div
+                {...getRootProps()}
+                className={`border-2 border-dashed rounded-2xl p-20 text-center cursor-pointer transition-colors ${
+                  isDragActive
+                    ? 'border-red-400 bg-red-50 dark:bg-red-900/10'
+                    : 'border-gray-300 dark:border-gray-700 hover:border-gray-400 dark:hover:border-gray-600'
+                }`}
+              >
+                <input {...getInputProps()} />
+                <div className="w-16 h-16 rounded-2xl bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 flex items-center justify-center mx-auto mb-4">
+                  <Upload className={`w-7 h-7 transition-colors ${isDragActive ? 'text-red-500' : 'text-gray-400'}`} />
+                </div>
+                <p className="text-gray-700 dark:text-gray-200 font-semibold text-lg mb-1">Drop your PDF here</p>
+                <p className="text-gray-400 dark:text-gray-500 text-sm">or click to select</p>
+              </div>
+              {relatedTools.length > 0 && <RelatedTools tools={relatedTools} />}
+            </motion.div>
+          )}
+
+          {/* ── LOADING thumbnails ── */}
+          {stage === 'loading' && (
+            <motion.div
+              key="loading"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-14 text-center"
+            >
+              <Loader2 className="w-10 h-10 text-red-500 animate-spin mx-auto mb-4" />
+              <p className="text-gray-700 dark:text-gray-200 font-semibold mb-1">Loading pages…</p>
+              {loadProgress.total > 0 && (
+                <p className="text-gray-400 text-sm mb-4">{loadProgress.done} / {loadProgress.total}</p>
+              )}
+              <div className="w-48 h-1.5 bg-gray-100 dark:bg-gray-800 rounded-full mx-auto">
+                <div
+                  className="h-full bg-red-500 rounded-full transition-all"
+                  style={{ width: loadProgress.total > 0 ? `${Math.round((loadProgress.done / loadProgress.total) * 100)}%` : '0%' }}
+                />
+              </div>
+            </motion.div>
+          )}
+
+          {/* ── READY: page grid ── */}
+          {stage === 'ready' && pages.length > 0 && (
+            <motion.div key="ready" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+
+              {/* Toolbar */}
+              <div className="flex items-center justify-between mb-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-xl px-4 py-3">
+                <div className="flex items-center gap-3">
+                  <FileText className="w-4 h-4 text-red-500" />
+                  <span className="text-sm font-medium text-gray-700 dark:text-gray-200 truncate max-w-xs">{file?.name}</span>
+                  <span className="text-xs text-gray-400">{pages.length} page{pages.length !== 1 ? 's' : ''}</span>
+                </div>
+                <button
+                  onClick={reset}
+                  className="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 flex items-center gap-1 transition-colors"
+                >
+                  <X className="w-3.5 h-3.5" /> Change file
+                </button>
+              </div>
+
+              <p className="text-xs text-gray-400 dark:text-gray-500 mb-4 text-center">
+                Drag to reorder · Use arrows to rotate · Click × to delete · Then hit Apply
+              </p>
+
+              {/* Page grid */}
+              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 gap-3 mb-24">
+                {pages.map((p, i) => (
+                  <div
+                    key={`${p.originalIndex}-${i}`}
+                    draggable
+                    onDragStart={handleDragStart(i)}
+                    onDragOver={handleDragOver(i)}
+                    onDrop={handleDrop(i)}
+                    onDragEnd={handleDragEnd}
+                    className={`group relative bg-white dark:bg-gray-900 border rounded-xl overflow-hidden cursor-grab active:cursor-grabbing transition-all select-none ${
+                      dragIdx === i
+                        ? 'opacity-40 scale-95'
+                        : dropIdx === i && dragIdx !== null
+                          ? 'ring-2 ring-red-500 border-red-500'
+                          : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'
+                    }`}
+                  >
+                    {/* Thumbnail */}
+                    <div className="relative bg-gray-50 dark:bg-gray-800 aspect-[3/4] overflow-hidden flex items-center justify-center">
+                      <img
+                        src={p.thumb}
+                        alt={`Page ${i + 1}`}
+                        style={{ transform: `rotate(${p.rotation}deg)`, maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+                        className="transition-transform duration-200"
+                        draggable={false}
+                      />
+                      {/* Page number badge */}
+                      <div className="absolute top-1.5 left-1.5 w-5 h-5 rounded-full bg-gray-900/80 dark:bg-gray-950/90 text-white text-[10px] font-bold flex items-center justify-center">
+                        {i + 1}
+                      </div>
+                      {/* Delete button */}
+                      <button
+                        onClick={() => deletePage(i)}
+                        className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-red-500 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+
+                    {/* Rotate controls */}
+                    <div className="flex items-center justify-center gap-0.5 py-1.5 px-1">
+                      <button
+                        onClick={() => rotatePage(i, -1)}
+                        title="Rotate left"
+                        className="p-1 rounded text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                      </button>
+                      <span className="text-[10px] text-gray-400 w-7 text-center tabular-nums">{p.rotation}°</span>
+                      <button
+                        onClick={() => rotatePage(i, 1)}
+                        title="Rotate right"
+                        className="p-1 rounded text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+                      >
+                        <RotateCw className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Sticky action bar */}
+              <div className="fixed bottom-6 left-0 right-0 flex justify-center z-30 pointer-events-none">
+                <motion.div
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="pointer-events-auto bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-2xl shadow-xl px-6 py-4 flex items-center gap-6"
+                >
+                  <div>
+                    <p className="text-sm font-semibold text-gray-900 dark:text-white">{pages.length} pages remaining</p>
+                    <p className="text-xs text-gray-400">Drag to reorder, rotate or delete pages</p>
+                  </div>
+                  <button
+                    onClick={applyChanges}
+                    disabled={pages.length === 0}
+                    className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-white text-sm font-bold transition-opacity hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
+                    style={{ background: tool.color }}
+                  >
+                    <Download className="w-4 h-4" />
+                    Apply & Download
+                  </button>
+                </motion.div>
+              </div>
+            </motion.div>
+          )}
+
+          {/* ── PROCESSING ── */}
+          {stage === 'processing' && (
+            <motion.div
+              key="processing"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-14 text-center"
+            >
+              <div
+                className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-5"
+                style={{ background: `rgba(${rgb}, 0.12)` }}
+              >
+                <Loader2 className="w-8 h-8 animate-spin" style={{ color: tool.color }} />
+              </div>
+              <p className="text-gray-700 dark:text-gray-200 font-semibold mb-3">Applying changes…</p>
+              <div className="w-48 h-1.5 bg-gray-100 dark:bg-gray-800 rounded-full mx-auto">
+                <div
+                  className="h-full rounded-full transition-all duration-300"
+                  style={{ width: `${processProgress}%`, background: tool.color }}
+                />
+              </div>
+              <p className="text-xs text-gray-400 mt-2">{processProgress}%</p>
+            </motion.div>
+          )}
+
+          {/* ── DONE ── */}
+          {stage === 'done' && outputBlob && (
+            <motion.div
+              key="done"
+              initial={{ opacity: 0, scale: 0.97 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0 }}
+              className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-14 text-center"
+            >
+              <div className="w-16 h-16 rounded-full bg-green-50 dark:bg-green-900/20 flex items-center justify-center mx-auto mb-5">
+                <CheckCircle className="w-8 h-8 text-green-500" />
+              </div>
+              <h3 className="text-gray-900 dark:text-white font-bold text-xl mb-1">Done!</h3>
+              <p className="text-gray-400 text-sm mb-2">
+                {pages.length} page{pages.length !== 1 ? 's' : ''} · {formatBytes(outputBlob.size)}
+              </p>
+              <div className="flex items-center justify-center gap-3 mt-6">
+                <button
+                  onClick={download}
+                  className="flex items-center gap-2 px-6 py-3 rounded-xl text-white text-sm font-bold transition-opacity hover:opacity-90"
+                  style={{ background: tool.color }}
+                >
+                  <Download className="w-4 h-4" /> Download PDF
+                </button>
+                <button
+                  onClick={reset}
+                  className="px-5 py-3 rounded-xl border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 text-sm font-semibold hover:text-gray-900 dark:hover:text-white transition-colors"
+                >
+                  <RotateCcw className="w-4 h-4 inline mr-1.5" /> Start over
+                </button>
+              </div>
+            </motion.div>
+          )}
+
+          {/* ── ERROR ── */}
+          {stage === 'error' && (
+            <motion.div
+              key="error"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="bg-white dark:bg-gray-900 border border-red-200 dark:border-red-900/40 rounded-2xl p-14 text-center"
+            >
+              <div className="w-14 h-14 rounded-full bg-red-50 dark:bg-red-900/20 flex items-center justify-center mx-auto mb-4">
+                <AlertCircle className="w-7 h-7 text-red-500" />
+              </div>
+              <h3 className="text-gray-900 dark:text-white font-bold text-lg mb-2">Something went wrong</h3>
+              <p className="text-red-400 text-sm mb-6 max-w-sm mx-auto">{errorMsg}</p>
+              <button
+                onClick={reset}
+                className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white text-sm font-semibold transition-colors"
+              >
+                <RotateCcw className="w-4 h-4" /> Try again
+              </button>
+            </motion.div>
+          )}
+
+        </AnimatePresence>
+      </div>
+    </div>
+  )
+}
+
+// ─── AI Summarizer Interface ──────────────────────────────────────────────────
+
+function SummaryText({ text }: { text: string }) {
+  const paragraphs = text.split(/\n\n+/)
+  return (
+    <div className="space-y-4">
+      {paragraphs.map((para, pi) => {
+        const lines = para.split('\n').filter(Boolean)
+        const isList = lines.length > 1 && lines.every(l => /^[*•\-]\s/.test(l.trim()))
+        if (isList) {
+          return (
+            <ul key={pi} className="space-y-2">
+              {lines.map((line, li) => {
+                const content = line.replace(/^[*•\-]\s*/, '')
+                return (
+                  <li key={li} className="flex gap-2.5 text-sm text-gray-600 dark:text-gray-300 leading-relaxed">
+                    <span className="w-1.5 h-1.5 rounded-full bg-purple-500 flex-shrink-0 mt-2" />
+                    <span dangerouslySetInnerHTML={{ __html: content.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>') }} />
+                  </li>
+                )
+              })}
+            </ul>
+          )
+        }
+        const boldLine = para.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        const isHeading = /^\*\*.+\*\*:?$/.test(para.trim())
+        return isHeading
+          ? <h3 key={pi} className="text-sm font-bold text-gray-900 dark:text-white mt-2" dangerouslySetInnerHTML={{ __html: boldLine }} />
+          : <p key={pi} className="text-sm text-gray-600 dark:text-gray-300 leading-relaxed" dangerouslySetInnerHTML={{ __html: boldLine }} />
+      })}
+    </div>
+  )
+}
+
+function AISummarizerInterface({
+  tool,
+  category,
+  relatedTools,
+}: {
+  tool: Tool
+  category: ToolCategory | undefined
+  relatedTools: Tool[]
+}) {
+  const rgb = hexToRgb(tool.color)
+  const [file, setFile]       = useState<File | null>(null)
+  const [stage, setStage]     = useState<'idle' | 'loading' | 'done' | 'error'>('idle')
+  const [summary, setSummary] = useState('')
+  const [pages, setPages]     = useState(0)
+  const [copied, setCopied]   = useState(false)
+  const [errorMsg, setErrorMsg] = useState('')
+  const [detail, setDetail]   = useState<'brief' | 'standard' | 'detailed'>('standard')
+
+  const onDrop = useCallback(async (files: File[]) => {
+    const f = files[0]
+    if (!f) return
+    setFile(f)
+    setStage('loading')
+    setSummary('')
+    try {
+      const formData = new FormData()
+      formData.append('file', f)
+      formData.append('detail', detail)
+      const base = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000'
+      const res  = await fetch(`${base}/api/ai/summarize`, { method: 'POST', body: formData })
+      const json = await res.json().catch(() => ({})) as { summary?: string; pages?: number; detail?: string }
+      if (!res.ok) throw new Error(json.detail ?? 'Summarization failed')
+      setSummary(json.summary ?? '')
+      setPages(json.pages ?? 0)
+      setStage('done')
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Summarization failed')
+      setStage('error')
+    }
+  }, [detail])
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: PDF_ACCEPT,
+    maxFiles: 1,
+    disabled: stage === 'loading',
+  })
+
+  const reset = useCallback(() => {
+    setFile(null); setStage('idle'); setSummary(''); setErrorMsg(''); setPages(0)
+  }, [])
+
+  const copySummary = useCallback(async () => {
+    await navigator.clipboard.writeText(summary)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }, [summary])
+
+  const downloadSummary = useCallback(() => {
+    if (!summary || !file) return
+    const blob = new Blob([summary], { type: 'text/plain' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href     = url
+    a.download = file.name.replace(/\.pdf$/i, '_summary.txt')
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [summary, file])
+
+  return (
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
+      <Breadcrumb tool={tool} category={category} />
+      <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+
+        {/* Header */}
+        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} className="flex items-center gap-4 mb-8">
+          <div className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: `rgba(${rgb}, 0.15)`, color: tool.color }}>
+            <ToolIcon name={tool.icon} className="w-6 h-6" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-black text-gray-900 dark:text-white tracking-tight">{tool.name}</h1>
+            <p className="text-gray-500 dark:text-gray-400 text-sm">{tool.description}</p>
+          </div>
+        </motion.div>
+
+        <AnimatePresence mode="wait">
+
+          {/* ── IDLE ── */}
+          {stage === 'idle' && (
+            <motion.div key="idle" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+              {/* Detail level selector */}
+              <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-4 mb-4">
+                <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-3">Summary Detail</p>
+                <div className="grid grid-cols-3 gap-2">
+                  {([
+                    { id: 'brief',    label: 'Brief',    desc: '3–5 bullet points' },
+                    { id: 'standard', label: 'Standard', desc: '6–8 bullet points' },
+                    { id: 'detailed', label: 'Detailed', desc: 'Full coverage' },
+                  ] as const).map(opt => (
+                    <button
+                      key={opt.id}
+                      onClick={() => setDetail(opt.id)}
+                      className={`rounded-xl px-3 py-2.5 text-left transition-all border ${
+                        detail === opt.id
+                          ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20'
+                          : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600'
+                      }`}
+                    >
+                      <p className={`text-sm font-semibold ${detail === opt.id ? 'text-purple-600 dark:text-purple-400' : 'text-gray-700 dark:text-gray-200'}`}>{opt.label}</p>
+                      <p className="text-xs text-gray-400 mt-0.5">{opt.desc}</p>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div
+                {...getRootProps()}
+                className={`border-2 border-dashed rounded-2xl p-20 text-center cursor-pointer transition-colors ${
+                  isDragActive ? 'border-purple-400 bg-purple-50 dark:bg-purple-900/10' : 'border-gray-300 dark:border-gray-700 hover:border-gray-400 dark:hover:border-gray-600'
+                }`}
+              >
+                <input {...getInputProps()} />
+                <div className="w-16 h-16 rounded-2xl bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 flex items-center justify-center mx-auto mb-4">
+                  <Upload className={`w-7 h-7 transition-colors ${isDragActive ? 'text-purple-500' : 'text-gray-400'}`} />
+                </div>
+                <p className="text-gray-700 dark:text-gray-200 font-semibold text-lg mb-1">Drop your PDF here</p>
+                <p className="text-gray-400 dark:text-gray-500 text-sm">The AI will summarize it in the document&apos;s own language</p>
+              </div>
+              {relatedTools.length > 0 && <RelatedTools tools={relatedTools} />}
+            </motion.div>
+          )}
+
+          {/* ── LOADING ── */}
+          {stage === 'loading' && (
+            <motion.div key="loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-16 text-center"
+            >
+              <div className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-5" style={{ background: `rgba(${rgb}, 0.12)` }}>
+                <Loader2 className="w-7 h-7 animate-spin" style={{ color: tool.color }} />
+              </div>
+              <p className="text-gray-700 dark:text-gray-200 font-semibold mb-1">Summarizing…</p>
+              <p className="text-gray-400 text-sm">{file?.name}</p>
+            </motion.div>
+          )}
+
+          {/* ── DONE ── */}
+          {stage === 'done' && (
+            <motion.div key="done" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+              {/* Meta bar */}
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2 text-xs text-gray-400">
+                  <FileText className="w-3.5 h-3.5" />
+                  <span className="truncate max-w-xs">{file?.name}</span>
+                  {pages > 0 && <span>· {pages} pages</span>}
+                </div>
+                <button onClick={reset} className="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 flex items-center gap-1 transition-colors">
+                  <X className="w-3.5 h-3.5" /> New file
+                </button>
+              </div>
+
+              {/* Summary card */}
+              <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-6 mb-4">
+                <div className="flex items-center gap-2 mb-4 pb-3 border-b border-gray-100 dark:border-gray-800">
+                  <Bot className="w-4 h-4" style={{ color: tool.color }} />
+                  <span className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">AI Summary</span>
+                </div>
+                <SummaryText text={summary} />
+              </div>
+
+              {/* Actions */}
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={copySummary}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-400 text-sm font-semibold hover:text-gray-900 dark:hover:text-white transition-colors"
+                >
+                  {copied ? <CheckCircle className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
+                  {copied ? 'Copied!' : 'Copy text'}
+                </button>
+                <button
+                  onClick={downloadSummary}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-white text-sm font-bold transition-opacity hover:opacity-90"
+                  style={{ background: tool.color }}
+                >
+                  <Download className="w-4 h-4" /> Save as .txt
+                </button>
+              </div>
+            </motion.div>
+          )}
+
+          {/* ── ERROR ── */}
+          {stage === 'error' && (
+            <motion.div key="error" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              className="bg-white dark:bg-gray-900 border border-red-200 dark:border-red-900/40 rounded-2xl p-14 text-center"
+            >
+              <div className="w-14 h-14 rounded-full bg-red-50 dark:bg-red-900/20 flex items-center justify-center mx-auto mb-4">
+                <AlertCircle className="w-7 h-7 text-red-500" />
+              </div>
+              <h3 className="text-gray-900 dark:text-white font-bold text-lg mb-2">Summarization failed</h3>
+              <p className="text-red-400 text-sm mb-6 max-w-sm mx-auto">{errorMsg}</p>
+              <button onClick={reset} className="inline-flex items-center gap-2 px-6 py-2.5 rounded-xl border border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white text-sm font-semibold transition-colors">
+                <RotateCcw className="w-4 h-4" /> Try again
+              </button>
+            </motion.div>
+          )}
+
+        </AnimatePresence>
+      </div>
+    </div>
+  )
+}
+
+// ─── Default export ───────────────────────────────────────────────────────────
+
+export default function ToolClient({
+  tool,
+  category,
+  relatedTools,
+}: {
+  tool: Tool
+  category: ToolCategory | undefined
+  relatedTools: Tool[]
+}) {
+  if (tool.comingSoon) return <ComingSoonPage tool={tool} category={category} />
+  if (tool.id === 'ai-summarizer') return <AISummarizerInterface tool={tool} category={category} relatedTools={relatedTools} />
+  if (tool.category === 'ai') return <AIToolInterface tool={tool} category={category} relatedTools={relatedTools} />
+  if (tool.id === 'markdown-editor') return <MarkdownEditorTool tool={tool} category={category} relatedTools={relatedTools} />
+  if (tool.id === 'merge-pdf') return <MergePdfInterface tool={tool} category={category} relatedTools={relatedTools} />
+  if (tool.id === 'organize-pdf') return <OrganizePdfInterface tool={tool} category={category} relatedTools={relatedTools} />
+  return <FileToolInterface tool={tool} category={category} relatedTools={relatedTools} />
+}

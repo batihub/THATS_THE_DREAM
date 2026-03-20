@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}FileConvert{% endblock %}
+
+{% block content %}
+<section class="hero">
+  <div class="hero-inner">
+    <h1 class="hero-title">Convert. Compress. Clean.</h1>
+    <p class="hero-sub">
+      Fast, free file conversion for PDFs, images, audio and video.
+      No account. No tracking. Files deleted automatically.
+    </p>
+    <a href="/pdf" class="btn btn-primary btn-lg">Start Converting</a>
+  </div>
+</section>
+
+<section class="categories">
+  <div class="container">
+    <div class="category-grid">
+
+      <a href="/pdf" class="category-card">
+        <div class="category-icon" style="--c:#ef4444">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14,2 14,8 20,8"/>
+            <line x1="9" y1="15" x2="15" y2="15"/>
+            <line x1="9" y1="11" x2="15" y2="11"/>
+          </svg>
+        </div>
+        <h3>PDF Tools</h3>
+        <p>Compress, convert, merge, split, and strip metadata from PDF files</p>
+        <ul class="tool-list">
+          <li>Compress PDF</li>
+          <li>PDF ↔ Word</li>
+          <li>Merge &amp; Split</li>
+          <li>Strip Metadata</li>
+        </ul>
+      </a>
+
+      <a href="/image" class="category-card">
+        <div class="category-icon" style="--c:#3b82f6">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2"/>
+            <circle cx="8.5" cy="8.5" r="1.5"/>
+            <polyline points="21,15 16,10 5,21"/>
+          </svg>
+        </div>
+        <h3>Image Tools</h3>
+        <p>Convert HEIC, compress photos, resize, and strip EXIF metadata</p>
+        <ul class="tool-list">
+          <li>Convert &amp; Compress</li>
+          <li>HEIC → JPG</li>
+          <li>Resize</li>
+          <li>Strip EXIF</li>
+        </ul>
+      </a>
+
+      <a href="/audio" class="category-card">
+        <div class="category-icon" style="--c:#8b5cf6">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 18V5l12-2v13"/>
+            <circle cx="6" cy="18" r="3"/>
+            <circle cx="18" cy="16" r="3"/>
+          </svg>
+        </div>
+        <h3>Audio Tools</h3>
+        <p>Convert formats, compress, extract audio from video, strip tags</p>
+        <ul class="tool-list">
+          <li>MP3 / WAV / OGG</li>
+          <li>Compress Audio</li>
+          <li>Extract from Video</li>
+          <li>Strip Metadata</li>
+        </ul>
+      </a>
+
+      <a href="/video" class="category-card">
+        <div class="category-icon" style="--c:#f59e0b">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="23,7 16,12 23,17"/>
+            <rect x="1" y="5" width="15" height="14" rx="2"/>
+          </svg>
+        </div>
+        <h3>Video Tools</h3>
+        <p>Convert MP4, MKV, MOV and compress video files</p>
+        <ul class="tool-list">
+          <li>MP4 / MKV / MOV</li>
+          <li>Compress Video</li>
+          <li>AVI / WebM</li>
+        </ul>
+      </a>
+
+      <a href="/document" class="category-card">
+        <div class="category-icon" style="--c:#22c55e">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14,2 14,8 20,8"/>
+            <line x1="9" y1="13" x2="15" y2="13"/>
+            <line x1="9" y1="17" x2="11" y2="17"/>
+          </svg>
+        </div>
+        <h3>Document Tools</h3>
+        <p>OCR, Markdown to PDF, HTML to PDF, CSV/JSON conversion</p>
+        <ul class="tool-list">
+          <li>OCR (Image → Text)</li>
+          <li>Markdown → PDF</li>
+          <li>CSV ↔ JSON</li>
+        </ul>
+      </a>
+
+    </div>
+  </div>
+</section>
+
+<section class="privacy-section">
+  <div class="container">
+    <h2 class="section-title">Built for privacy</h2>
+    <div class="privacy-grid">
+      <div class="privacy-card">
+        <div class="privacy-icon">🗑</div>
+        <h4>Auto-deleted</h4>
+        <p>Your files are permanently deleted from our server within 30 minutes of upload.</p>
+      </div>
+      <div class="privacy-card">
+        <div class="privacy-icon">🚫</div>
+        <h4>No account needed</h4>
+        <p>Upload, convert, download. No sign-up, no email, no tracking cookies.</p>
+      </div>
+      <div class="privacy-card">
+        <div class="privacy-icon">🔍</div>
+        <h4>Strip hidden data</h4>
+        <p>PDFs store your name, OS, edit history. Photos store GPS coordinates. We remove it all.</p>
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock %}

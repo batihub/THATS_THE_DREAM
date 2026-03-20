@@ -6,6 +6,7 @@ services:
       - "8000:8000"
     volumes:
       - .:/app
+      - fileconvert_tmp:/tmp/fileconvert
     env_file:
       - .env
     depends_on:
@@ -16,6 +17,7 @@ services:
     build: .
     volumes:
       - .:/app
+      - fileconvert_tmp:/tmp/fileconvert
     env_file:
       - .env
     depends_on:
@@ -26,16 +28,27 @@ services:
     build: .
     volumes:
       - .:/app
+      - fileconvert_tmp:/tmp/fileconvert
     env_file:
       - .env
     depends_on:
       - redis
     command: celery -A app.core.celery_app worker --loglevel=info -Q heavy --concurrency=2
 
+  scheduler:
+    build: .
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    command: celery -A app.core.celery_app beat --loglevel=info
+
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6380:6379"
 
   flower:
     image: mher/flower
@@ -45,3 +58,16 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
     depends_on:
       - redis
+
+  frontend:
+    build:
+      context: ./pdfworks
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  fileconvert_tmp:

@@ -1,0 +1,108 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #ffffff;
+  --foreground: #0f172a;
+  --nav-bg: rgba(255, 255, 255, 0.85);
+  --nav-border: rgba(0, 0, 0, 0.1);
+  --dot-color: #000000;
+}
+
+.dark {
+  --background: #030712;
+  --foreground: #f1f5f9;
+  --nav-bg: rgba(3, 7, 18, 0.75);
+  --nav-border: rgba(255, 255, 255, 0.08);
+  --dot-color: #ffffff;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+@keyframes gradient-shift {
+  0%   { background-position: 0%   50% }
+  50%  { background-position: 100% 50% }
+  100% { background-position: 0%   50% }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  .animate-gradient {
+    background-size: 200% 200%;
+    animation: gradient-shift 5s ease infinite;
+  }
+  .nav-glass {
+    background: var(--nav-bg);
+    border-bottom: 1px solid var(--nav-border);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+  /* Hide scrollbar cross-browser while preserving scroll */
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+  /* Safe area padding helpers */
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .pt-safe {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+}
+
+/* ── Marching-ants drag border ───────────────────────────────────────────── */
+@keyframes marchingAnts {
+  to {
+    background-position: 15px 0, -15px 100%, 0 -15px, 100% 15px;
+  }
+}
+
+.border-march {
+  border: none !important;
+  background-image:
+    linear-gradient(90deg, #a855f7 50%, transparent 50%),
+    linear-gradient(90deg, #a855f7 50%, transparent 50%),
+    linear-gradient(0deg,  #a855f7 50%, transparent 50%),
+    linear-gradient(0deg,  #a855f7 50%, transparent 50%);
+  background-repeat: repeat-x, repeat-x, repeat-y, repeat-y;
+  background-size: 14px 2px, 14px 2px, 2px 14px, 2px 14px;
+  background-position: 0 0, 0 100%, 0 0, 100% 0;
+  animation: marchingAnts 0.45s linear infinite;
+}
+
+/* ── Progress-bar shimmer ────────────────────────────────────────────────── */
+@keyframes shimmerSlide {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(300%); }
+}
+
+.animate-shimmer {
+  animation: shimmerSlide 1.8s ease-in-out infinite;
+}
+
+/* ── Reduced-motion overrides ────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  .animate-gradient,
+  .animate-shimmer,
+  .border-march {
+    animation: none !important;
+  }
+  * {
+    transition-duration: 0.01ms !important;
+  }
+}
