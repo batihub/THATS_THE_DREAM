@@ -185,3 +185,93 @@ MIT — see [LICENSE](./LICENSE)
 ---
 
 *PDFworks.io — Free PDF & File Tools. No signup. No tracking. Built for everyone.*
+
+
+
+
+
+1.
+The solution of the differential equation
+
+xy′ = y − x cos²(y/x)
+
+is
+
+a) tan(y/x) = −ln x + c  
+b) tan(y/x) = ln x + c  
+c) tan u = ln x + c  
+d) tan(y/x) = xc  
+e) None
+
+2.
+Determine the values of m and n such that
+
+λ(x, y) = x^m y^n
+
+is an integrating factor for the differential equation
+
+(y² + 4xy) dx + (5x² + 8xy) dy = 0
+
+a) m = −2/3, n = 1/3  
+b) m = 0, n = 1  
+c) m = −2/3, n = 2/3  
+d) m = 1/3, n = −2/3  
+e) m = 1, n = 0
+
+3.
+A particular solution for the equation
+
+y′′ − 10y′ + 25y = e^(5x) / x³
+
+is
+
+a) e^(5x)  
+b) e^(5x) / x³  
+c) e^(5x) / (2x)  
+d) −1 / x²  
+e) None
+
+4.
+The solution of the initial value problem
+
+dy/dx + x tan y = y^4 cos y,    y(1) = 0
+
+is:
+
+a) y = ((x^5 + 5) cos x) / 5  
+b) y = ((x^5 + 5) sin x) / 5  
+c) x = ((y^5 + 5) cos y) / 5  
+d) x = ((y^5 + 5) sin y) / 5  
+e) None
+
+Decide whether the following statements are TRUE or FALSE.
+
+5.
+d(yz)/dx = (dy/dx)z + y(dz/dx) is not a differential equation, but an identity.
+
+6.
+A first order ordinary differential equation can be linear, separable and exact at the same time.
+
+7.
+The function y = 0 is always a solution to any linear ordinary differential equation.
+
+Fill in the blanks.
+
+8.
+The Wronskian of the functions y1(x) = cos x and y2(x) = sin x,
+
+W(y1, y2) = ________ , so y1 and y2 are linearly ________ .
+
+9.
+If y = x^r is a solution to the equation x^2 (d^2y/dx^2) - 3y = 0, then the sum of possible values of r is ________ .
+
+10.
+If sec^2 x is an integrating factor for the differential equation
+
+dy/dx + p(x)y = q(x),
+
+then p(x) = ________ .
+
+
+
+
